@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ralph-auto"
+version = "0.1.0"
+description = "Automated orchestration for the Ralph agentic coding workflow"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "python-slugify>=8.0",
+]
+
+[project.scripts]
+ralph-auto = "ralph_auto.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ralph_auto"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

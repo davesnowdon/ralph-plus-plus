@@ -1,0 +1,97 @@
+# ralph-auto configuration example
+# Copy to ralph-auto.yaml and edit for your setup
+
+# ── Paths ──────────────────────────────────────────────────────────────
+# repo_path: /path/to/repo        # override with --repo flag
+claude_config_dir: ~/.claude
+codex_config_dir: ~/.codex
+
+# ── Branch naming ──────────────────────────────────────────────────────
+branch_prefix: "ralph/"
+branch_suffix_length: 4           # random hex chars for uniqueness
+
+# ── Tool definitions ───────────────────────────────────────────────────
+tools:
+  codex:
+    type: cli
+    command: codex
+    args: ["{prompt}"]
+
+  claude:
+    type: cli
+    command: claude
+    args: ["--dangerously-skip-permissions", "--print"]
+    stdin: "{prompt}"
+
+  # Custom tool example:
+  # my_reviewer:
+  #   type: shell
+  #   command: "my-review-script.sh"
+  #   args: ["{prompt}"]
+
+# ── PRD review loop ────────────────────────────────────────────────────
+prd_review:
+  reviewer: codex
+  reviewer_prompt: >
+    Read the PRD at {prd_file}. Evaluate whether it is complete, unambiguous,
+    and implementable as a series of independent user stories. List any flaws,
+    omissions, or areas for improvement. If the PRD is fully satisfactory,
+    output exactly: LGTM
+  fixer: claude
+  fixer_prompt: >
+    The following issues were found in the PRD at {prd_file}.
+    Please fix them:
+
+    {findings}
+  max_cycles: 3
+
+# ── Inner review loop (runs after each ralph iteration, inside sandbox) ─
+inner_review:
+  enabled: true
+  reviewer: codex
+  reviewer_prompt: >
+    Review the following git diff against the requirements in prd.json.
+    Identify any flaws, omissions or regressions introduced by these changes.
+    If everything looks correct, output exactly: LGTM
+
+    GIT DIFF:
+    {diff}
+  fixer: claude
+  fixer_prompt: >
+    The following issues were found in the latest code changes.
+    Please fix them and ensure all tests pass:
+
+    {findings}
+  max_cycles: 2
+
+# ── Post-run review loop ───────────────────────────────────────────────
+post_review:
+  reviewer: codex
+  reviewer_prompt: >
+    Read prd.json and review the entire implementation. Does the code fully
+    satisfy every user story? List any flaws, omissions or areas for
+    improvement. If fully satisfied, output exactly: LGTM
+  fixer: claude
+  fixer_prompt: >
+    The following issues were found in the final implementation.
+    Please fix them and ensure all tests pass:
+
+    {findings}
+  max_cycles: 3
+
+# ── Ralph sandbox ──────────────────────────────────────────────────────
+ralph:
+  max_iterations: 20
+  sandbox_image: ralph-sandbox
+  ralph_script: scripts/ralph/ralph-reviewed.sh
+
+# ── Lifecycle hooks ────────────────────────────────────────────────────
+hooks:
+  post_worktree_create:
+    - "codegraph init"
+    - "codegraph index"
+  pre_prd_generate: []
+  post_prd_generate: []
+  pre_sandbox: []
+  post_sandbox: []
+  post_complete: []
