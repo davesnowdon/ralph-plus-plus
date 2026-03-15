@@ -1,4 +1,4 @@
-"""Configuration loading and validation for ralph-auto."""
+"""Configuration loading and validation for ralph++."""
 
 from __future__ import annotations
 

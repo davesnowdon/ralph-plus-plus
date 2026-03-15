@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import yaml
 
-from ralph_auto.config import load_config, Config
+from ralph_pp.config import load_config, Config
 
 
 def test_load_empty_config():

@@ -7,13 +7,12 @@ build/
 venv/
 .env
 *.yaml
-!ralph-auto.yaml.example
+!ralph++.yaml.example
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
 *.log
 
 # Agent Zero project internals (secrets, memory indexes)
-.a0proj/secrets.env
-.a0proj/variables.env
-.a0proj/memory/
+.a0proj/
+

@@ -1,4 +1,4 @@
-# ralph-auto
+# ralph++
 
 Automated orchestration for the [Ralph](https://github.com/snarktank/ralph) agentic coding workflow.
 
@@ -25,13 +25,13 @@ pip install -e .
 
 ```bash
 # Minimal
-ralph-auto --feature "add user authentication"
+ralph++ --feature "add user authentication"
 
 # With options
-ralph-auto \
+ralph++ \
   --feature "add user authentication" \
   --repo /path/to/repo \
-  --config ralph-auto.yaml \
+  --config ralph++.yaml \
   --claude-config ~/.claude \
   --codex-config ~/.codex \
   --max-iters 20
@@ -39,7 +39,7 @@ ralph-auto \
 
 ## Configuration
 
-Copy `ralph-auto.yaml.example` to `ralph-auto.yaml` and edit to suit your setup.
+Copy `ralph++.yaml.example` to `ralph++.yaml` and edit to suit your setup.
 
 ## Requirements
 

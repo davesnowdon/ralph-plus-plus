@@ -1,4 +1,4 @@
-"""CLI entry point for ralph-auto."""
+"""CLI entry point for ralph++."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ console = Console()
     "config_file",
     type=click.Path(exists=False, dir_okay=False, path_type=Path),
     default=None,
-    help="Path to ralph-auto.yaml config file.",
+    help="Path to ralph++.yaml config file.",
 )
 @click.option(
     "--claude-config",
@@ -84,9 +84,9 @@ def main(
     # Search for config file if not specified
     if config_file is None:
         candidates = [
-            Path("ralph-auto.yaml"),
-            Path("ralph-auto.yml"),
-            Path.home() / ".ralph-auto.yaml",
+            Path("ralph++.yaml"),
+            Path("ralph++.yml"),
+            Path.home() / ".ralph++.yaml",
         ]
         for candidate in candidates:
             if candidate.exists():

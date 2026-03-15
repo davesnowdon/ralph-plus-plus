@@ -2,7 +2,7 @@
 # ralph-reviewed.sh — Ralph Wiggum with blocking inner review loop
 # Forked from https://github.com/snarktank/ralph
 #
-# Additional env vars (injected by ralph-auto orchestrator):
+# Additional env vars (injected by ralph++ orchestrator):
 #   SKIP_REVIEW=0|1              disable inner review (default: 0)
 #   MAX_REVIEW_CYCLES=N          max review+fix cycles per iteration (default: 2)
 #   REVIEWER_CMD                 shell command to run reviewer (receives prompt via stdin)

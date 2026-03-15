@@ -1,7 +1,7 @@
 """Tests for branch name generation."""
 
-from ralph_auto.config import load_config
-from ralph_auto.steps.worktree import make_branch_name
+from ralph_pp.config import load_config
+from ralph_pp.steps.worktree import make_branch_name
 
 
 def test_branch_name_slugified():

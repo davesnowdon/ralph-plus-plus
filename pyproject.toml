@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ralph-auto"
+name = "ralph-pp"
 version = "0.1.0"
 description = "Automated orchestration for the Ralph agentic coding workflow"
 readme = "README.md"
@@ -16,10 +16,10 @@ dependencies = [
 ]
 
 [project.scripts]
-ralph-auto = "ralph_auto.cli:main"
+"ralph++" = "ralph_pp.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["ralph_auto"]
+packages = ["ralph_pp"]
 
 [tool.ruff]
 line-length = 100

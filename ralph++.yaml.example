@@ -1,5 +1,5 @@
-# ralph-auto configuration example
-# Copy to ralph-auto.yaml and edit for your setup
+# ralph++ configuration example
+# Copy to ralph++.yaml and edit for your setup
 
 # ── Paths ──────────────────────────────────────────────────────────────
 # repo_path: /path/to/repo        # override with --repo flag

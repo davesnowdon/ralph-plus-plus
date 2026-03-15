@@ -31,7 +31,7 @@ class Orchestrator:
         skip_prd_review: bool = False,
         skip_post_review: bool = False,
     ) -> None:
-        title = "ralph-auto\nFeature: " + self.feature
+        title = "ralph++\nFeature: " + self.feature
         console.print(Panel.fit(title, border_style="bright_blue"))
 
         if self.dry_run:
@@ -50,7 +50,7 @@ class Orchestrator:
             raise
 
         console.print(Rule(style="green"))
-        summary = "✓ ralph-auto complete!\nBranch: " + str(self.branch) + "\nWorktree: " + str(self.worktree_path)
+        summary = "✓ ralph++ complete!\nBranch: " + str(self.branch) + "\nWorktree: " + str(self.worktree_path)
         console.print(Panel.fit(summary, border_style="green"))
 
     # ── Steps ──────────────────────────────────────────────────────────
