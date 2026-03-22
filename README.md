@@ -1,5 +1,7 @@
 # ralph++
 
+WORK IN PROGRESS DO NOT USE
+
 Automated orchestration for the [Ralph](https://github.com/snarktank/ralph) agentic coding workflow.
 
 ## What it does
