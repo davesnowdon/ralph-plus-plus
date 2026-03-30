@@ -31,9 +31,7 @@ def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
 
     prd_file = worktree_path / "tasks" / "prd.md"
     if not prd_file.exists():
-        raise RuntimeError(
-            f"PRD generation succeeded (exit 0) but {prd_file} was not created"
-        )
+        raise RuntimeError(f"PRD generation succeeded (exit 0) but {prd_file} was not created")
     console.print(f"[green]✓ PRD generated:[/green] {prd_file}")
     return prd_file
 
@@ -66,10 +64,8 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
             return
 
         console.print(f"[yellow]Issues found in cycle {cycle} — running fix pass...[/yellow]")
-        fix_prompt = (
-            review_cfg.fixer_prompt
-            .replace("{prd_file}", str(prd_file))
-            .replace("{findings}", result.output)
+        fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_file)).replace(
+            "{findings}", result.output
         )
         fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
         if not fix_result.success:
@@ -99,9 +95,7 @@ def convert_prd_to_json(prd_file: Path, worktree_path: Path, config: Config) -> 
 
     prd_json = worktree_path / "scripts" / "ralph" / "prd.json"
     if not prd_json.exists():
-        raise RuntimeError(
-            f"PRD conversion succeeded (exit 0) but {prd_json} was not created"
-        )
+        raise RuntimeError(f"PRD conversion succeeded (exit 0) but {prd_json} was not created")
     try:
         json.loads(prd_json.read_text())
     except json.JSONDecodeError as e:

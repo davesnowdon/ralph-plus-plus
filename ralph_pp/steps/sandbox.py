@@ -66,10 +66,14 @@ def _build_sandbox_command(
 
     cmd = [
         str(wrapper),
-        "--project-dir", str(worktree_path),
-        "--tool", tool,
-        "--claude-config-dir", str(config.claude_config_dir),
-        "--codex-config-dir", str(config.codex_config_dir),
+        "--project-dir",
+        str(worktree_path),
+        "--tool",
+        tool,
+        "--claude-config-dir",
+        str(config.claude_config_dir),
+        "--codex-config-dir",
+        str(config.codex_config_dir),
     ]
 
     if session_runner is not None:
@@ -85,7 +89,9 @@ def _build_sandbox_command(
 def _get_head_sha(worktree_path: Path) -> str:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=worktree_path, capture_output=True, text=True,
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -98,7 +104,8 @@ def _backout_to(worktree_path: Path, sha: str) -> None:
     console.print(f"[yellow]  Backing out to {sha[:8]}...[/yellow]")
     subprocess.run(
         ["git", "reset", "--hard", sha],
-        cwd=worktree_path, check=True,
+        cwd=worktree_path,
+        check=True,
     )
 
 
@@ -124,12 +131,12 @@ def _render_prompt(template: str, **kwargs: str) -> str:
 def _get_diff(worktree_path: Path, from_sha: str) -> str:
     result = subprocess.run(
         ["git", "diff", from_sha, "HEAD"],
-        cwd=worktree_path, capture_output=True, text=True,
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"git diff failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
+        raise RuntimeError(f"git diff failed (exit {result.returncode}): {result.stderr.strip()}")
     return result.stdout or "(no diff)"
 
 
@@ -141,7 +148,8 @@ def _run_delegated(worktree_path: Path, config: Config) -> bool:
     console.print("[bold cyan]\n── Delegated mode ──[/bold cyan]")
 
     cmd = _build_sandbox_command(
-        worktree_path, config,
+        worktree_path,
+        config,
         tool=config.ralph.sandbox_tool,
         ralph_args=[str(config.ralph.max_iterations)],
     )
@@ -232,7 +240,8 @@ def _run_fixer_in_sandbox(
 
     session_runner = _session_runner_path(config)
     cmd = _build_sandbox_command(
-        worktree_path, config,
+        worktree_path,
+        config,
         tool=orch.fixer,
         session_runner=session_runner,
         ralph_args=["1"],
@@ -247,6 +256,7 @@ def _run_fixer_in_sandbox(
 def _merge_env(extra: dict[str, str]) -> dict[str, str]:
     """Merge extra env vars into a copy of the current environment."""
     import os
+
     env = os.environ.copy()
     env.update(extra)
     return env
@@ -294,18 +304,23 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
         iteration_passed = False
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
-                console.print(f"  [yellow]Retry {attempt}/{max_attempts} for iteration {iteration}[/yellow]")
+                console.print(
+                    f"  [yellow]Retry {attempt}/{max_attempts} for iteration {iteration}[/yellow]"
+                )
 
             # Run coder in sandbox
             cmd = _build_sandbox_command(
-                worktree_path, config,
+                worktree_path,
+                config,
                 tool=orch.coder,
                 session_runner=session_runner,
                 ralph_args=["1"],
             )
             console.print(f"  [dim]Running coder ({orch.coder})...[/dim]")
             result = subprocess.run(
-                cmd, text=True, capture_output=True,
+                cmd,
+                text=True,
+                capture_output=True,
                 env=_merge_env(extra_env) if extra_env else None,
             )
 
@@ -315,9 +330,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
             # Check for infra/sandbox failure
             if result.returncode != 0:
-                console.print(
-                    f"  [red]✗ Coder process failed (exit {result.returncode})[/red]"
-                )
+                console.print(f"  [red]✗ Coder process failed (exit {result.returncode})[/red]")
                 if orch.backout_on_failure and attempt < max_attempts:
                     _backout_to(worktree_path, pre_sha)
                     continue
@@ -363,13 +376,16 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     _backout_to(worktree_path, pre_sha)
                 else:
                     console.print(
-                        f"  [yellow]⚠ All retries exhausted for iteration {iteration} — continuing[/yellow]"
+                        f"  [yellow]⚠ All retries exhausted for iteration "
+                        f"{iteration} — continuing[/yellow]"
                     )
                     iteration_passed = False
             else:
                 # PATH B: Invoke fixer to fix in-place
                 for fix_cycle in range(1, orch.max_iteration_retries + 1):
-                    console.print(f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]")
+                    console.print(
+                        f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]"
+                    )
                     fixer_result = _run_fixer_in_sandbox(findings, worktree_path, config)
                     if fixer_result.returncode != 0:
                         console.print(
@@ -394,7 +410,8 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
                 if not iteration_passed:
                     console.print(
-                        f"  [yellow]⚠ Fix cycles exhausted for iteration {iteration} — continuing[/yellow]"
+                        f"  [yellow]⚠ Fix cycles exhausted for iteration "
+                        f"{iteration} — continuing[/yellow]"
                     )
                 break  # In fix-in-place mode we don't retry the coder, only the fixer
 

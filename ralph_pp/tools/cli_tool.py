@@ -8,8 +8,8 @@ from pathlib import Path
 
 from rich.console import Console
 
-from .base import BaseTool, ToolResult
 from ..config import ToolConfig
+from .base import BaseTool, ToolResult
 
 console = Console()
 
@@ -34,9 +34,7 @@ class CliTool(BaseTool):
             env.update(extra_env)
 
         # Build args list, substituting {prompt} placeholder
-        args = [self.config.command] + [
-            a.replace("{prompt}", prompt) for a in self.config.args
-        ]
+        args = [self.config.command] + [a.replace("{prompt}", prompt) for a in self.config.args]
 
         # Determine stdin
         stdin_data: str | None = None

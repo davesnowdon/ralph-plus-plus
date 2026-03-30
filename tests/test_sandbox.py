@@ -1,9 +1,7 @@
 """Tests for sandbox command construction, helpers, and delegated mode."""
 
-import subprocess
-from pathlib import Path
-from unittest.mock import patch
 import tempfile
+from pathlib import Path
 
 from ralph_pp.config import load_config
 from ralph_pp.steps.sandbox import (
@@ -46,7 +44,8 @@ def test_build_sandbox_command_delegated(tmp_path):
     worktree.mkdir()
 
     cmd = _build_sandbox_command(
-        worktree, cfg,
+        worktree,
+        cfg,
         tool="claude",
         ralph_args=["20"],
     )
@@ -76,7 +75,8 @@ def test_build_sandbox_command_with_session_runner(tmp_path):
     runner.write_text("#!/bin/bash\necho run")
 
     cmd = _build_sandbox_command(
-        worktree, cfg,
+        worktree,
+        cfg,
         tool="codex",
         session_runner=runner,
         ralph_args=["1"],
@@ -121,15 +121,13 @@ def test_render_prompt_missing_placeholder():
 
 
 def test_delegated_mode_integration(tmp_path):
-    """Integration test: delegated mode invokes the wrapper with correct args and returns based on exit code."""
+    """Integration test: delegated mode invokes the wrapper with correct args."""
     sandbox_dir = tmp_path / "ralph-sandbox"
     (sandbox_dir / "bin").mkdir(parents=True)
     wrapper = sandbox_dir / "bin" / "ralph-sandbox"
     # Fake wrapper that records its args and exits 0
     wrapper.write_text(
-        '#!/bin/bash\n'
-        'echo "ARGS: $@" > "$(dirname "$0")/../invocation.log"\n'
-        'exit 0\n'
+        '#!/bin/bash\necho "ARGS: $@" > "$(dirname "$0")/../invocation.log"\nexit 0\n'
     )
     wrapper.chmod(0o755)
 
@@ -153,7 +151,7 @@ def test_delegated_mode_returns_false_on_failure(tmp_path):
     sandbox_dir = tmp_path / "ralph-sandbox"
     (sandbox_dir / "bin").mkdir(parents=True)
     wrapper = sandbox_dir / "bin" / "ralph-sandbox"
-    wrapper.write_text('#!/bin/bash\nexit 1\n')
+    wrapper.write_text("#!/bin/bash\nexit 1\n")
     wrapper.chmod(0o755)
 
     cfg = _make_config_with_sandbox_dir(str(sandbox_dir))

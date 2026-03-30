@@ -43,10 +43,8 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
             return
 
         console.print(f"[yellow]Issues found in cycle {cycle} — running fix pass...[/yellow]")
-        fix_prompt = (
-            review_cfg.fixer_prompt
-            .replace("{prd_file}", str(prd_json))
-            .replace("{findings}", result.output)
+        fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_json)).replace(
+            "{findings}", result.output
         )
         fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
         if not fix_result.success:
@@ -55,5 +53,6 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
             )
 
     console.print(
-        f"[yellow]⚠ Post-run review: max cycles ({review_cfg.max_cycles}) reached — continuing[/yellow]"
+        f"[yellow]⚠ Post-run review: max cycles ({review_cfg.max_cycles}) "
+        "reached — continuing[/yellow]"
     )

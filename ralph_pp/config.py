@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,11 +11,11 @@ import yaml
 
 @dataclass
 class ToolConfig:
-    type: str = "cli"          # cli | shell
+    type: str = "cli"  # cli | shell
     command: str = ""
-    args: list[str] = field(default_factory=list)
-    stdin: str | None = None   # template string sent via stdin
-    env: dict[str, str] = field(default_factory=dict)
+    args: list[str] = field(default_factory=lambda: list[str]())
+    stdin: str | None = None  # template string sent via stdin
+    env: dict[str, str] = field(default_factory=lambda: dict[str, str]())
 
 
 @dataclass
@@ -32,9 +31,9 @@ class ReviewConfig:
 @dataclass
 class RalphConfig:
     max_iterations: int = 20
-    mode: str = "delegated"              # "delegated" | "orchestrated"
-    sandbox_dir: str = ""                # path to ralph-sandbox checkout
-    sandbox_tool: str = "claude"         # tool for sandbox (delegated mode): claude | codex
+    mode: str = "delegated"  # "delegated" | "orchestrated"
+    sandbox_dir: str = ""  # path to ralph-sandbox checkout
+    sandbox_tool: str = "claude"  # tool for sandbox (delegated mode): claude | codex
     session_runner: str = "scripts/ralph-single-step.sh"  # session runner for orchestrated mode
 
 
@@ -45,7 +44,7 @@ class OrchestratedConfig:
     fixer: str = "claude"
     max_iteration_retries: int = 2
     run_tests_between_steps: bool = False
-    test_commands: list[str] = field(default_factory=list)
+    test_commands: list[str] = field(default_factory=lambda: list[str]())
     backout_on_failure: bool = True
     review_prompt: str = (
         "Review the following git diff against the requirements in {prd_file}.\n"
@@ -72,7 +71,7 @@ class Config:
     branch_suffix_length: int = 4
 
     # Tools
-    tools: dict[str, ToolConfig] = field(default_factory=dict)
+    tools: dict[str, ToolConfig] = field(default_factory=lambda: dict[str, ToolConfig]())
 
     # Review stages
     prd_review: ReviewConfig = field(default_factory=ReviewConfig)
@@ -85,11 +84,13 @@ class Config:
     orchestrated: OrchestratedConfig = field(default_factory=OrchestratedConfig)
 
     # Hooks
-    hooks: dict[str, list[str]] = field(default_factory=dict)
+    hooks: dict[str, list[str]] = field(default_factory=lambda: dict[str, list[str]]())
 
     def get_tool(self, name: str) -> ToolConfig:
         if name not in self.tools:
-            raise ValueError(f"Tool '{name}' not defined in config. Available: {list(self.tools.keys())}")
+            raise ValueError(
+                f"Tool '{name}' not defined in config. Available: {list(self.tools.keys())}"
+            )
         return self.tools[name]
 
 
@@ -193,7 +194,9 @@ def load_config(path: Path | None, overrides: dict[str, Any] | None = None) -> C
             coder=o.get("coder", defaults.coder),
             reviewer=o.get("reviewer", defaults.reviewer),
             fixer=o.get("fixer", defaults.fixer),
-            max_iteration_retries=int(o.get("max_iteration_retries", defaults.max_iteration_retries)),
+            max_iteration_retries=int(
+                o.get("max_iteration_retries", defaults.max_iteration_retries)
+            ),
             run_tests_between_steps=_parse_bool(
                 o.get("run_tests_between_steps", defaults.run_tests_between_steps),
                 defaults.run_tests_between_steps,
@@ -230,9 +233,7 @@ def validate_config(cfg: Config) -> None:
     for attr in ("coder", "reviewer", "fixer"):
         name = getattr(cfg.orchestrated, attr)
         if name not in cfg.tools:
-            errors.append(
-                f"orchestrated.{attr}={name!r} not in tools {list(cfg.tools)}"
-            )
+            errors.append(f"orchestrated.{attr}={name!r} not in tools {list(cfg.tools)}")
 
     for stage_name, review_cfg in [
         ("prd_review", cfg.prd_review),
@@ -245,13 +246,12 @@ def validate_config(cfg: Config) -> None:
                 f"{stage_name}.reviewer={review_cfg.reviewer!r} not in tools {list(cfg.tools)}"
             )
         if review_cfg.fixer not in cfg.tools:
-            errors.append(
-                f"{stage_name}.fixer={review_cfg.fixer!r} not in tools {list(cfg.tools)}"
-            )
+            errors.append(f"{stage_name}.fixer={review_cfg.fixer!r} not in tools {list(cfg.tools)}")
 
     if not isinstance(cfg.orchestrated.test_commands, list):
         errors.append(
-            f"orchestrated.test_commands must be a list, got {type(cfg.orchestrated.test_commands).__name__}"
+            "orchestrated.test_commands must be a list, "
+            f"got {type(cfg.orchestrated.test_commands).__name__}"
         )
     elif cfg.orchestrated.run_tests_between_steps:
         for i, cmd in enumerate(cfg.orchestrated.test_commands):

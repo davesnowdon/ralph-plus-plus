@@ -1,7 +1,5 @@
 """Tests for ToolResult.is_lgtm exact-match semantics."""
 
-import pytest
-
 from ralph_pp.tools.base import ToolResult
 
 

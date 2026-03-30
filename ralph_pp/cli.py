@@ -15,18 +15,21 @@ console = Console()
 
 @click.command()
 @click.option(
-    "--feature", "-f",
+    "--feature",
+    "-f",
     required=True,
     help="Feature description (used to name the branch and generate the PRD).",
 )
 @click.option(
-    "--repo", "-r",
+    "--repo",
+    "-r",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=None,
     help="Path to the git repository. Defaults to current directory.",
 )
 @click.option(
-    "--config", "-c",
+    "--config",
+    "-c",
     "config_file",
     type=click.Path(exists=False, dir_okay=False, path_type=Path),
     default=None,
@@ -63,10 +66,12 @@ console = Console()
     help="Skip the post-run review loop.",
 )
 @click.option(
-    "--mode", "-m",
+    "--mode",
+    "-m",
     type=click.Choice(["delegated", "orchestrated"], case_sensitive=False),
     default=None,
-    help="Workflow mode: 'delegated' (default Ralph loop) or 'orchestrated' (ralph++ controls each iteration).",
+    help="Workflow mode: 'delegated' (default Ralph loop) "
+    "or 'orchestrated' (ralph++ controls each iteration).",
 )
 @click.option(
     "--dry-run",
@@ -102,7 +107,7 @@ def main(
                 break
 
     # Build overrides from CLI flags
-    overrides: dict = {}
+    overrides: dict[str, object] = {}
     if repo:
         overrides["repo_path"] = repo
     elif repo is None:

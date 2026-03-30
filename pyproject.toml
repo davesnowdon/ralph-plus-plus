@@ -21,10 +21,15 @@ dependencies = [
 [tool.hatch.build.targets.wheel]
 packages = ["ralph_pp"]
 
+[dependency-groups]
+dev = ["pytest>=8.0", "pyright>=1.1.380", "ruff>=0.8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
-[tool.mypy]
-python_version = "3.11"
-strict = true
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

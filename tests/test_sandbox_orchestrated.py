@@ -2,13 +2,13 @@
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ralph_pp.config import Config, ToolConfig, RalphConfig, OrchestratedConfig
+from ralph_pp.config import Config, OrchestratedConfig, RalphConfig, ToolConfig
+from ralph_pp.steps.sandbox import _run_fixer_in_sandbox, _run_orchestrated
 from ralph_pp.tools.base import ToolResult
-from ralph_pp.steps.sandbox import _run_orchestrated, _run_fixer_in_sandbox
 
 
 def _make_config(
@@ -68,7 +68,10 @@ def _setup_worktree(tmp_path: Path) -> Path:
 def _fake_subprocess_run(returncode=0, stdout="", stderr=""):
     """Create a fake CompletedProcess."""
     result = subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=stderr,
+        args=[],
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
     )
     return result
 
@@ -77,9 +80,11 @@ class TestCoderInfraFailure:
     """Finding 2: coder subprocess failure should not fall through to review."""
 
     def test_coder_failure_retries_in_backout_mode(self, tmp_path):
-        """When coder exits nonzero in backout mode, it should retry and only review the successful attempt."""
+        """When coder exits nonzero in backout mode, retries and reviews only the success."""
         worktree = _setup_worktree(tmp_path)
-        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=1, backout_on_failure=True)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=1, backout_on_failure=True
+        )
 
         git_sha = "abc1234"
         coder_call_count = 0
@@ -109,7 +114,10 @@ class TestCoderInfraFailure:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
         ):
             _run_orchestrated(worktree, config)
 
@@ -120,7 +128,9 @@ class TestCoderInfraFailure:
     def test_coder_failure_skips_review_when_no_retries(self, tmp_path):
         """When coder exits nonzero and no retries left, skip review entirely."""
         worktree = _setup_worktree(tmp_path)
-        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=0, backout_on_failure=True)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=0, backout_on_failure=True
+        )
 
         review_called = False
 
@@ -138,11 +148,16 @@ class TestCoderInfraFailure:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
         ):
             result = _run_orchestrated(worktree, config)
 
-        assert review_called is False, "Review should not be called after infra failure with no retries"
+        assert review_called is False, (
+            "Review should not be called after infra failure with no retries"
+        )
         assert result is False
 
 
@@ -153,7 +168,9 @@ class TestFixerInfraFailure:
         """When fixer exits nonzero, stop fix cycles (don't re-review)."""
         worktree = _setup_worktree(tmp_path)
         config = _make_config(
-            tmp_path, max_iterations=1, max_iteration_retries=2,
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=2,
             backout_on_failure=False,
         )
 
@@ -180,9 +197,12 @@ class TestFixerInfraFailure:
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
-            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
         ):
-            result = _run_orchestrated(worktree, config)
+            _run_orchestrated(worktree, config)
 
         # Only 1 review (initial), no re-review after broken fixer
         assert review_count == 1, "Should not re-review after fixer infra failure"
@@ -195,9 +215,12 @@ class TestTestFailureBlocking:
         """Tests fail on last attempt, reviewer says LGTM — iteration should NOT pass."""
         worktree = _setup_worktree(tmp_path)
         config = _make_config(
-            tmp_path, max_iterations=1, max_iteration_retries=0,
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=0,
             backout_on_failure=True,
-            run_tests=True, test_commands=["false"],
+            run_tests=True,
+            test_commands=["false"],
         )
 
         def mock_subprocess_run(cmd, **kwargs):
@@ -218,7 +241,10 @@ class TestTestFailureBlocking:
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
-            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
         ):
             result = _run_orchestrated(worktree, config)
 
@@ -232,9 +258,12 @@ class TestFixInPlaceTestRerun:
         """Fixer succeeds, but tests still fail — iteration should not be accepted."""
         worktree = _setup_worktree(tmp_path)
         config = _make_config(
-            tmp_path, max_iterations=1, max_iteration_retries=2,
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=2,
             backout_on_failure=False,
-            run_tests=True, test_commands=["pytest"],
+            run_tests=True,
+            test_commands=["pytest"],
         )
 
         test_call_count = 0
@@ -262,7 +291,10 @@ class TestFixInPlaceTestRerun:
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
             patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
-            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
         ):
             result = _run_orchestrated(worktree, config)
 
@@ -278,9 +310,12 @@ class TestFixInPlaceTestRerun:
         """
         worktree = _setup_worktree(tmp_path)
         config = _make_config(
-            tmp_path, max_iterations=1, max_iteration_retries=2,
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=2,
             backout_on_failure=False,
-            run_tests=True, test_commands=["pytest"],
+            run_tests=True,
+            test_commands=["pytest"],
         )
 
         test_call_count = 0
@@ -315,7 +350,10 @@ class TestFixInPlaceTestRerun:
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
             patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
-            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
         ):
             result = _run_orchestrated(worktree, config)
 
@@ -323,7 +361,9 @@ class TestFixInPlaceTestRerun:
         assert result is False, "No COMPLETE signal — workflow returns False"
         # But the iteration itself should be marked as passed in progress.txt
         progress = (worktree / "scripts" / "ralph" / "progress.txt").read_text()
-        assert "Iteration 1 — passed" in progress, "Iteration should be marked passed in progress.txt"
+        assert "Iteration 1 — passed" in progress, (
+            "Iteration should be marked passed in progress.txt"
+        )
         assert test_call_count == 2, "Tests should be called initially and after fix"
         assert review_call_count == 2, "Reviewer should be called after tests pass"
 
@@ -349,7 +389,10 @@ class TestReviewerInfraFailure:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool,
-            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
         ):
             mock_tool = MagicMock()
             mock_tool.run.return_value = reviewer_result
@@ -416,7 +459,10 @@ class TestPromptPropagation:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
         ):
             _run_orchestrated(worktree, config)
 
@@ -436,9 +482,18 @@ class TestPromptPropagation:
         findings_text = "Line 42: missing null check in parser.py"
 
         with (
-            patch("ralph_pp.steps.sandbox._sandbox_wrapper", return_value=tmp_path / "ralph-sandbox" / "bin" / "ralph-sandbox"),
-            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
-            patch("ralph_pp.steps.sandbox.subprocess.run", return_value=_fake_subprocess_run(returncode=0)),
+            patch(
+                "ralph_pp.steps.sandbox._sandbox_wrapper",
+                return_value=tmp_path / "ralph-sandbox" / "bin" / "ralph-sandbox",
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+            patch(
+                "ralph_pp.steps.sandbox.subprocess.run",
+                return_value=_fake_subprocess_run(returncode=0),
+            ),
         ):
             _run_fixer_in_sandbox(findings_text, worktree, config)
 

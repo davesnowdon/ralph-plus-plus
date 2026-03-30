@@ -1,20 +1,22 @@
 """Tests for PRD generation and conversion artifact validation."""
 
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ralph_pp.steps.prd import convert_prd_to_json, generate_prd
 from ralph_pp.tools.base import ToolResult
-from ralph_pp.steps.prd import generate_prd, convert_prd_to_json
 
 
 def _make_config():
     """Minimal config with default tools."""
     from ralph_pp.config import Config, ToolConfig
-    return Config(tools={
-        "claude": ToolConfig(command="claude", args=["--print"], stdin="{prompt}"),
-    })
+
+    return Config(
+        tools={
+            "claude": ToolConfig(command="claude", args=["--print"], stdin="{prompt}"),
+        }
+    )
 
 
 class TestGeneratePrd:

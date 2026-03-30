@@ -1,10 +1,19 @@
 """Tests for config loading."""
 
-from pathlib import Path
 import tempfile
+from pathlib import Path
+
 import yaml
 
-from ralph_pp.config import load_config, validate_config, _parse_bool, Config, ToolConfig, OrchestratedConfig, RalphConfig
+from ralph_pp.config import (
+    Config,
+    OrchestratedConfig,
+    RalphConfig,
+    ToolConfig,
+    _parse_bool,
+    load_config,
+    validate_config,
+)
 
 
 def test_load_empty_config():
@@ -158,6 +167,7 @@ def test_parse_bool_string_no():
 
 def test_parse_bool_invalid_string():
     import pytest
+
     with pytest.raises(ValueError, match="Invalid boolean"):
         _parse_bool("maybe", False)
 
@@ -167,6 +177,7 @@ def test_parse_bool_invalid_string():
 
 def test_validate_config_bad_mode():
     import pytest
+
     cfg = Config(
         tools={"claude": ToolConfig(), "codex": ToolConfig()},
         ralph=RalphConfig(mode="invalid"),
@@ -177,6 +188,7 @@ def test_validate_config_bad_mode():
 
 def test_validate_config_bad_sandbox_tool():
     import pytest
+
     cfg = Config(
         tools={"claude": ToolConfig()},
         ralph=RalphConfig(sandbox_tool="nonexistent"),
@@ -187,6 +199,7 @@ def test_validate_config_bad_sandbox_tool():
 
 def test_validate_config_bad_orchestrated_coder():
     import pytest
+
     cfg = Config(
         tools={"claude": ToolConfig(), "codex": ToolConfig()},
         orchestrated=OrchestratedConfig(coder="nonexistent"),
@@ -217,3 +230,29 @@ def test_load_config_string_false_boolean():
     assert cfg.orchestrated.backout_on_failure is False
     assert cfg.orchestrated.run_tests_between_steps is False
     tmp_path.unlink()
+
+
+def test_validate_config_empty_test_command():
+    import pytest
+
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        orchestrated=OrchestratedConfig(
+            run_tests_between_steps=True,
+            test_commands=["pytest", ""],
+        ),
+    )
+    with pytest.raises(ValueError, match="test_commands"):
+        validate_config(cfg)
+
+
+def test_validate_config_test_commands_not_checked_when_disabled():
+    """Empty test_commands entries are fine when run_tests_between_steps is False."""
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        orchestrated=OrchestratedConfig(
+            run_tests_between_steps=False,
+            test_commands=[""],
+        ),
+    )
+    validate_config(cfg)  # should not raise
