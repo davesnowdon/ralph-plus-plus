@@ -16,7 +16,8 @@ class ToolResult:
     @property
     def is_lgtm(self) -> bool:
         """True if the tool output signals no issues found."""
-        return "LGTM" in self.output
+        stripped = self.output.strip()
+        return stripped == "LGTM" or stripped.startswith("LGTM\n")
 
 
 class BaseTool(ABC):

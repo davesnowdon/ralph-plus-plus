@@ -301,30 +301,48 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if combined_output:
                 console.print(combined_output)
 
+            # Check for infra/sandbox failure
+            if result.returncode != 0:
+                console.print(
+                    f"  [red]✗ Coder process failed (exit {result.returncode})[/red]"
+                )
+                if orch.backout_on_failure and attempt < max_attempts:
+                    _backout_to(worktree_path, pre_sha)
+                    continue
+                console.print("  [red]Infra failure — skipping review[/red]")
+                break
+
             # Check for completion signal
             if COMPLETE_SIGNAL in combined_output:
                 console.print("[green]Ralph signaled COMPLETE[/green]")
                 return True
 
             # Run tests/linter (optional)
+            tests_failed = False
             if orch.run_tests_between_steps and orch.test_commands:
                 console.print("  [dim]Running test commands...[/dim]")
                 tests_ok = _run_test_commands(worktree_path, orch.test_commands)
                 if not tests_ok:
                     console.print("  [yellow]Tests failed — treating as review failure[/yellow]")
+                    tests_failed = True
                     if orch.backout_on_failure and attempt < max_attempts:
                         _backout_to(worktree_path, pre_sha)
                         continue
-                    # Fall through to review (which will likely also fail)
 
             # Review changes
             diff = _get_diff(worktree_path, pre_sha)
             passed, findings = _review_iteration(iteration, diff, worktree_path, config)
             last_findings = findings
 
-            if passed:
+            if passed and not tests_failed:
                 iteration_passed = True
                 break
+            elif tests_failed and passed:
+                console.print(
+                    "  [yellow]Reviewer approved but tests failed — not accepting[/yellow]"
+                )
+                passed = False
+                last_findings = "Tests failed. " + findings
 
             # Handle review failure
             if orch.backout_on_failure:
@@ -340,7 +358,12 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 # PATH B: Invoke fixer to fix in-place
                 for fix_cycle in range(1, orch.max_iteration_retries + 1):
                     console.print(f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]")
-                    _run_fixer_in_sandbox(findings, worktree_path, config)
+                    fixer_result = _run_fixer_in_sandbox(findings, worktree_path, config)
+                    if fixer_result.returncode != 0:
+                        console.print(
+                            f"  [red]✗ Fixer process failed (exit {fixer_result.returncode})[/red]"
+                        )
+                        break
 
                     # Re-review after fix
                     diff = _get_diff(worktree_path, pre_sha)
