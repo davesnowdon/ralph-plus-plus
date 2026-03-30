@@ -8,7 +8,7 @@ import pytest
 
 from ralph_pp.config import Config, ToolConfig, RalphConfig, OrchestratedConfig
 from ralph_pp.tools.base import ToolResult
-from ralph_pp.steps.sandbox import _run_orchestrated
+from ralph_pp.steps.sandbox import _run_orchestrated, _run_fixer_in_sandbox
 
 
 def _make_config(
@@ -381,3 +381,69 @@ class TestGitHelperFailures:
             )
             with pytest.raises(RuntimeError, match="git diff failed"):
                 _get_diff(tmp_path, "abc1234")
+
+
+class TestPromptPropagation:
+    """Verify that prompt templates are rendered and written correctly."""
+
+    def test_iteration_prompt_contains_expected_placeholders(self, tmp_path):
+        """Orchestrated mode writes .iteration-prompt.md with iteration, progress, and findings."""
+        worktree = _setup_worktree(tmp_path)
+        # Seed progress.txt so the template has progress content
+        progress_file = worktree / "scripts" / "ralph" / "progress.txt"
+        progress_file.write_text("## Iteration 0 — seed\n")
+
+        template = (
+            "Iteration: {iteration}\n"
+            "PRD: {prd_file}\n"
+            "Progress:\n{progress}\n"
+            "Previous findings:\n{review_findings}\n"
+        )
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=0)
+        config.orchestrated.prompt_template = template
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            # Coder succeeds
+            return _fake_subprocess_run(returncode=0, stdout="output")
+
+        def mock_review(*args, **kwargs):
+            return (True, "LGTM")
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+        ):
+            _run_orchestrated(worktree, config)
+
+        iter_prompt = worktree / "scripts" / "ralph" / ".iteration-prompt.md"
+        assert iter_prompt.exists(), ".iteration-prompt.md should be written"
+        content = iter_prompt.read_text()
+        assert "Iteration: 1" in content
+        assert "prd.json" in content
+        assert "## Iteration 0 — seed" in content  # progress content
+        # First iteration has no prior findings
+        assert "Previous findings:\n\n" in content
+
+    def test_fix_prompt_contains_findings(self, tmp_path):
+        """Fixer writes .fix-prompt.md containing the review findings."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=1)
+        findings_text = "Line 42: missing null check in parser.py"
+
+        with (
+            patch("ralph_pp.steps.sandbox._sandbox_wrapper", return_value=tmp_path / "ralph-sandbox" / "bin" / "ralph-sandbox"),
+            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+            patch("ralph_pp.steps.sandbox.subprocess.run", return_value=_fake_subprocess_run(returncode=0)),
+        ):
+            _run_fixer_in_sandbox(findings_text, worktree, config)
+
+        fix_prompt = worktree / "scripts" / "ralph" / ".fix-prompt.md"
+        assert fix_prompt.exists(), ".fix-prompt.md should be written"
+        content = fix_prompt.read_text()
+        assert findings_text in content
+        assert "prd.json" in content

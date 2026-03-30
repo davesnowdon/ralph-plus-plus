@@ -249,5 +249,14 @@ def validate_config(cfg: Config) -> None:
                 f"{stage_name}.fixer={review_cfg.fixer!r} not in tools {list(cfg.tools)}"
             )
 
+    if not isinstance(cfg.orchestrated.test_commands, list):
+        errors.append(
+            f"orchestrated.test_commands must be a list, got {type(cfg.orchestrated.test_commands).__name__}"
+        )
+    elif cfg.orchestrated.run_tests_between_steps:
+        for i, cmd in enumerate(cfg.orchestrated.test_commands):
+            if not isinstance(cmd, str) or not cmd.strip():
+                errors.append(f"orchestrated.test_commands[{i}] is empty or not a string")
+
     if errors:
         raise ValueError("Config validation failed:\n  " + "\n  ".join(errors))

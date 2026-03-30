@@ -1,12 +1,15 @@
-"""Tests for sandbox command construction and helpers."""
+"""Tests for sandbox command construction, helpers, and delegated mode."""
 
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 import tempfile
 
 from ralph_pp.config import load_config
 from ralph_pp.steps.sandbox import (
     _build_sandbox_command,
     _render_prompt,
+    _run_delegated,
 )
 
 
@@ -115,3 +118,48 @@ def test_render_prompt_missing_placeholder():
     template = "Review {diff} and {unknown}"
     result = _render_prompt(template, diff="changes")
     assert result == "Review changes and {unknown}"
+
+
+def test_delegated_mode_integration(tmp_path):
+    """Integration test: delegated mode invokes the wrapper with correct args and returns based on exit code."""
+    sandbox_dir = tmp_path / "ralph-sandbox"
+    (sandbox_dir / "bin").mkdir(parents=True)
+    wrapper = sandbox_dir / "bin" / "ralph-sandbox"
+    # Fake wrapper that records its args and exits 0
+    wrapper.write_text(
+        '#!/bin/bash\n'
+        'echo "ARGS: $@" > "$(dirname "$0")/../invocation.log"\n'
+        'exit 0\n'
+    )
+    wrapper.chmod(0o755)
+
+    cfg = _make_config_with_sandbox_dir(str(sandbox_dir))
+    worktree = tmp_path / "project"
+    worktree.mkdir()
+
+    result = _run_delegated(worktree, cfg)
+
+    assert result is True
+    log = (sandbox_dir / "invocation.log").read_text()
+    assert "--project-dir" in log
+    assert str(worktree) in log
+    assert "--tool" in log
+    assert "claude" in log
+    assert "20" in log  # default max_iterations
+
+
+def test_delegated_mode_returns_false_on_failure(tmp_path):
+    """Delegated mode returns False when wrapper exits nonzero."""
+    sandbox_dir = tmp_path / "ralph-sandbox"
+    (sandbox_dir / "bin").mkdir(parents=True)
+    wrapper = sandbox_dir / "bin" / "ralph-sandbox"
+    wrapper.write_text('#!/bin/bash\nexit 1\n')
+    wrapper.chmod(0o755)
+
+    cfg = _make_config_with_sandbox_dir(str(sandbox_dir))
+    worktree = tmp_path / "project"
+    worktree.mkdir()
+
+    result = _run_delegated(worktree, cfg)
+
+    assert result is False
