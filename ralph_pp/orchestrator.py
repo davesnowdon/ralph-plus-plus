@@ -72,7 +72,8 @@ class Orchestrator:
 
     def _step_sandbox(self) -> None:
         assert self.worktree_path is not None
-        console.print(Rule("[bold]3 · Ralph Sandbox[/bold]"))
+        mode = self.config.ralph.mode
+        console.print(Rule(f"[bold]3 · Ralph Sandbox ({mode} mode)[/bold]"))
         run_hooks("pre_sandbox", self.config.hooks, self.worktree_path)
         success = run_sandbox(self.worktree_path, self.config)
         run_hooks("post_sandbox", self.config.hooks, self.worktree_path)

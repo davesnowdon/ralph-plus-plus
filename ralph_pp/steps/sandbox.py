@@ -1,67 +1,369 @@
-"""Docker sandbox invocation for the Ralph loop."""
+"""Docker sandbox invocation for the Ralph loop.
+
+Supports two modes:
+  - delegated: invoke ralph-sandbox with its built-in Ralph loop
+  - orchestrated: ralph++ controls each iteration, reviewing between them
+"""
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
 from rich.console import Console
 
-from ..config import Config
+from ..config import Config, OrchestratedConfig
+from ..tools import make_tool
 
 console = Console()
 
+COMPLETE_SIGNAL = "<promise>COMPLETE</promise>"
+
 
 def run_sandbox(worktree_path: Path, config: Config) -> bool:
-    """
-    Run the Ralph loop inside the docker sandbox.
+    """Run the Ralph loop. Dispatches to delegated or orchestrated mode."""
+    if config.ralph.mode == "orchestrated":
+        return _run_orchestrated(worktree_path, config)
+    return _run_delegated(worktree_path, config)
 
-    Mounts:
-      - worktree as /workspace
-      - claude config dir (read-only)
-      - codex config dir (read-only)
 
-    Returns True if ralph completed successfully, False otherwise.
-    """
-    console.print("[bold cyan]\n── Step: Ralph Sandbox ──[/bold cyan]")
+# ── Helpers ─────────────────────────────────────────────────────────────
 
-    inner = config.inner_review
-    ralph_cfg = config.ralph
 
-    # Build reviewer command string for injection into the shell script
-    reviewer_tool = config.get_tool(inner.reviewer)
-    reviewer_args = [a.replace("{prompt}", "$REVIEW_PROMPT") for a in reviewer_tool.args]
-    reviewer_cmd = reviewer_tool.command + (" " + " ".join(reviewer_args) if reviewer_args else "")
+def _sandbox_wrapper(config: Config) -> Path:
+    """Resolve the path to bin/ralph-sandbox."""
+    sandbox_dir = Path(config.ralph.sandbox_dir).expanduser().resolve()
+    wrapper = sandbox_dir / "bin" / "ralph-sandbox"
+    if not wrapper.is_file():
+        raise FileNotFoundError(
+            f"ralph-sandbox wrapper not found at {wrapper}. "
+            f"Set ralph.sandbox_dir in config to the ralph-sandbox checkout."
+        )
+    return wrapper
 
-    fixer_tool = config.get_tool(inner.fixer)
-    if fixer_tool.stdin is not None:
-        fixer_cmd = "echo \"$FIX_PROMPT\" | " + fixer_tool.command + " " + " ".join(fixer_tool.args)
-    else:
-        fixer_args = [a.replace("{prompt}", "$FIX_PROMPT") for a in fixer_tool.args]
-        fixer_cmd = fixer_tool.command + (" " + " ".join(fixer_args) if fixer_args else "")
 
-    docker_cmd = [
-        "docker", "run", "--rm",
-        "-v", str(worktree_path) + ":/workspace",
-        "-v", str(config.claude_config_dir) + ":/home/ralph/.claude:ro",
-        "-v", str(config.codex_config_dir) + ":/home/ralph/.codex:ro",
-        "-e", "SKIP_REVIEW=" + ("0" if inner.enabled else "1"),
-        "-e", "MAX_REVIEW_CYCLES=" + str(inner.max_cycles),
-        "-e", "REVIEWER_CMD=" + reviewer_cmd,
-        "-e", "FIXER_CMD=" + fixer_cmd,
-        "-e", "REVIEW_PROMPT_TEMPLATE=" + inner.reviewer_prompt,
-        "-e", "FIX_PROMPT_TEMPLATE=" + inner.fixer_prompt,
-        ralph_cfg.sandbox_image,
-        "--", str(ralph_cfg.max_iterations),
+def _session_runner_path(config: Config) -> Path:
+    """Resolve the session runner script path (relative to ralph-plus-plus repo)."""
+    # session_runner is relative to the ralph-plus-plus repo root
+    rpp_root = Path(__file__).resolve().parent.parent.parent
+    runner = rpp_root / config.ralph.session_runner
+    if not runner.is_file():
+        raise FileNotFoundError(f"Session runner not found at {runner}")
+    return runner
+
+
+def _build_sandbox_command(
+    worktree_path: Path,
+    config: Config,
+    tool: str,
+    session_runner: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+    ralph_args: list[str] | None = None,
+) -> list[str]:
+    """Build the bin/ralph-sandbox CLI command."""
+    wrapper = _sandbox_wrapper(config)
+
+    cmd = [
+        str(wrapper),
+        "--project-dir", str(worktree_path),
+        "--tool", tool,
+        "--claude-config-dir", str(config.claude_config_dir),
+        "--codex-config-dir", str(config.codex_config_dir),
     ]
 
-    console.print("[dim]$ docker run --rm -v " + str(worktree_path) + " ...[/dim]")
+    if session_runner is not None:
+        cmd.extend(["--session-runner", str(session_runner)])
 
-    result = subprocess.run(docker_cmd, text=True)
+    if ralph_args:
+        cmd.append("--")
+        cmd.extend(ralph_args)
+
+    return cmd
+
+
+def _get_head_sha(worktree_path: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree_path, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def _backout_to(worktree_path: Path, sha: str) -> None:
+    console.print(f"[yellow]  Backing out to {sha[:8]}...[/yellow]")
+    subprocess.run(
+        ["git", "reset", "--hard", sha],
+        cwd=worktree_path, check=True,
+    )
+
+
+def _run_test_commands(worktree_path: Path, commands: list[str]) -> bool:
+    """Run test/lint commands. Returns True if all pass."""
+    for cmd in commands:
+        console.print(f"[dim]  $ {cmd}[/dim]")
+        result = subprocess.run(cmd, shell=True, cwd=worktree_path)
+        if result.returncode != 0:
+            console.print(f"[red]  ✗ Command failed: {cmd}[/red]")
+            return False
+    return True
+
+
+def _render_prompt(template: str, **kwargs: str) -> str:
+    """Substitute placeholders in a prompt template."""
+    result = template
+    for key, value in kwargs.items():
+        result = result.replace("{" + key + "}", value)
+    return result
+
+
+def _get_diff(worktree_path: Path, from_sha: str) -> str:
+    result = subprocess.run(
+        ["git", "diff", from_sha, "HEAD"],
+        cwd=worktree_path, capture_output=True, text=True,
+    )
+    return result.stdout or "(no diff)"
+
+
+# ── Delegated mode ─────────────────────────────────────────────────────
+
+
+def _run_delegated(worktree_path: Path, config: Config) -> bool:
+    """Mode 1: Invoke ralph-sandbox with its built-in Ralph loop."""
+    console.print("[bold cyan]\n── Delegated mode ──[/bold cyan]")
+
+    cmd = _build_sandbox_command(
+        worktree_path, config,
+        tool=config.ralph.sandbox_tool,
+        ralph_args=[str(config.ralph.max_iterations)],
+    )
+
+    console.print("[dim]$ " + " ".join(cmd[:5]) + " ...[/dim]")
+    result = subprocess.run(cmd, text=True)
 
     if result.returncode == 0:
         console.print("[green]✓ Ralph completed successfully[/green]")
         return True
     else:
-        console.print("[red]✗ Ralph exited with code " + str(result.returncode) + "[/red]")
+        console.print(f"[red]✗ Ralph exited with code {result.returncode}[/red]")
         return False
+
+
+# ── Orchestrated mode ──────────────────────────────────────────────────
+
+
+def _setup_worktree_files(worktree_path: Path) -> None:
+    """Ensure scripts/ralph/ has the required files for orchestrated mode.
+
+    In custom-runner mode the sandbox entrypoint does not copy ralph.sh or
+    CLAUDE.md, so ralph++ must set them up before the first iteration.
+    """
+    ralph_dir = worktree_path / "scripts" / "ralph"
+    ralph_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy upstream CLAUDE.md from the ralph-sandbox image's /opt/ralph/
+    # source — but since we're on the host, we look for it in the worktree
+    # or fall back to a reasonable default prompt.
+    claude_md = ralph_dir / "CLAUDE.md"
+    if not claude_md.exists():
+        # Check if there's a CLAUDE.md at the repo root we can use
+        repo_claude = worktree_path / "CLAUDE.md"
+        if repo_claude.exists():
+            shutil.copy2(repo_claude, claude_md)
+        else:
+            claude_md.write_text(
+                "Read scripts/ralph/prd.json and implement the next incomplete user story.\n"
+                "After implementing, run tests and commit your changes.\n"
+                "If all stories are complete, output: <promise>COMPLETE</promise>\n"
+            )
+
+    progress = ralph_dir / "progress.txt"
+    if not progress.exists():
+        progress.write_text("# Ralph Progress Log\nStarted: orchestrated mode\n---\n")
+
+
+def _review_iteration(
+    iteration: int,
+    diff: str,
+    worktree_path: Path,
+    config: Config,
+) -> tuple[bool, str]:
+    """Run reviewer on the iteration diff. Returns (passed, findings)."""
+    orch = config.orchestrated
+    reviewer = make_tool(orch.reviewer, config)
+    prd_file = str(worktree_path / "scripts" / "ralph" / "prd.json")
+
+    review_prompt = _render_prompt(orch.review_prompt, diff=diff, prd_file=prd_file)
+    result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
+
+    if result.is_lgtm:
+        console.print(f"  [green]✓ Review passed (LGTM) — iteration {iteration}[/green]")
+        return True, result.output
+
+    console.print(f"  [yellow]Issues found in iteration {iteration}[/yellow]")
+    return False, result.output
+
+
+def _run_fixer_in_sandbox(
+    findings: str,
+    worktree_path: Path,
+    config: Config,
+) -> subprocess.CompletedProcess[str]:
+    """Invoke the fixer agent inside the sandbox with the fix prompt."""
+    orch = config.orchestrated
+    prd_file = str(worktree_path / "scripts" / "ralph" / "prd.json")
+    fix_prompt = _render_prompt(orch.fix_prompt, findings=findings, prd_file=prd_file)
+
+    # Write fix prompt to a temp file in the worktree so the session runner can read it
+    prompt_file = worktree_path / "scripts" / "ralph" / ".fix-prompt.md"
+    prompt_file.write_text(fix_prompt)
+
+    session_runner = _session_runner_path(config)
+    cmd = _build_sandbox_command(
+        worktree_path, config,
+        tool=orch.fixer,
+        session_runner=session_runner,
+        ralph_args=["1"],
+    )
+
+    # Set RALPH_PROMPT_FILE so the session runner uses the fix prompt
+    env_patch = {"RALPH_PROMPT_FILE": str(Path("scripts/ralph/.fix-prompt.md"))}
+    console.print(f"  [dim]Running fixer ({orch.fixer})...[/dim]")
+    return subprocess.run(cmd, text=True, capture_output=True, env=_merge_env(env_patch))
+
+
+def _merge_env(extra: dict[str, str]) -> dict[str, str]:
+    """Merge extra env vars into a copy of the current environment."""
+    import os
+    env = os.environ.copy()
+    env.update(extra)
+    return env
+
+
+def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
+    """Mode 2: ralph++ controls each iteration with review between them."""
+    console.print("[bold cyan]\n── Orchestrated mode ──[/bold cyan]")
+
+    orch: OrchestratedConfig = config.orchestrated
+    session_runner = _session_runner_path(config)
+
+    # Phase 0: Setup
+    _setup_worktree_files(worktree_path)
+    prd_json = worktree_path / "scripts" / "ralph" / "prd.json"
+    if not prd_json.exists():
+        raise FileNotFoundError(f"prd.json not found at {prd_json}")
+
+    last_findings = ""
+
+    for iteration in range(1, config.ralph.max_iterations + 1):
+        console.print(f"\n[bold]═══ Iteration {iteration}/{config.ralph.max_iterations} ═══[/bold]")
+
+        pre_sha = _get_head_sha(worktree_path)
+
+        # Optionally write per-iteration prompt
+        extra_env: dict[str, str] = {}
+        if orch.prompt_template is not None:
+            progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+            progress_text = progress_file.read_text() if progress_file.exists() else ""
+            prompt_text = _render_prompt(
+                orch.prompt_template,
+                iteration=str(iteration),
+                prd_file=str(prd_json),
+                progress=progress_text,
+                review_findings=last_findings,
+            )
+            iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
+            iter_prompt.write_text(prompt_text)
+            extra_env["RALPH_PROMPT_FILE"] = str(Path("scripts/ralph/.iteration-prompt.md"))
+
+        # Run coding step (with retries for backout mode)
+        max_attempts = orch.max_iteration_retries + 1 if orch.backout_on_failure else 1
+
+        iteration_passed = False
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                console.print(f"  [yellow]Retry {attempt}/{max_attempts} for iteration {iteration}[/yellow]")
+
+            # Run coder in sandbox
+            cmd = _build_sandbox_command(
+                worktree_path, config,
+                tool=orch.coder,
+                session_runner=session_runner,
+                ralph_args=["1"],
+            )
+            console.print(f"  [dim]Running coder ({orch.coder})...[/dim]")
+            result = subprocess.run(
+                cmd, text=True, capture_output=True,
+                env=_merge_env(extra_env) if extra_env else None,
+            )
+
+            combined_output = (result.stdout or "") + (result.stderr or "")
+            if combined_output:
+                console.print(combined_output)
+
+            # Check for completion signal
+            if COMPLETE_SIGNAL in combined_output:
+                console.print("[green]Ralph signaled COMPLETE[/green]")
+                return True
+
+            # Run tests/linter (optional)
+            if orch.run_tests_between_steps and orch.test_commands:
+                console.print("  [dim]Running test commands...[/dim]")
+                tests_ok = _run_test_commands(worktree_path, orch.test_commands)
+                if not tests_ok:
+                    console.print("  [yellow]Tests failed — treating as review failure[/yellow]")
+                    if orch.backout_on_failure and attempt < max_attempts:
+                        _backout_to(worktree_path, pre_sha)
+                        continue
+                    # Fall through to review (which will likely also fail)
+
+            # Review changes
+            diff = _get_diff(worktree_path, pre_sha)
+            passed, findings = _review_iteration(iteration, diff, worktree_path, config)
+            last_findings = findings
+
+            if passed:
+                iteration_passed = True
+                break
+
+            # Handle review failure
+            if orch.backout_on_failure:
+                # PATH A: Backout and retry
+                if attempt < max_attempts:
+                    _backout_to(worktree_path, pre_sha)
+                else:
+                    console.print(
+                        f"  [yellow]⚠ All retries exhausted for iteration {iteration} — continuing[/yellow]"
+                    )
+                    iteration_passed = False
+            else:
+                # PATH B: Invoke fixer to fix in-place
+                for fix_cycle in range(1, orch.max_iteration_retries + 1):
+                    console.print(f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]")
+                    _run_fixer_in_sandbox(findings, worktree_path, config)
+
+                    # Re-review after fix
+                    diff = _get_diff(worktree_path, pre_sha)
+                    passed, findings = _review_iteration(iteration, diff, worktree_path, config)
+                    last_findings = findings
+                    if passed:
+                        iteration_passed = True
+                        break
+
+                if not iteration_passed:
+                    console.print(
+                        f"  [yellow]⚠ Fix cycles exhausted for iteration {iteration} — continuing[/yellow]"
+                    )
+                break  # In fix-in-place mode we don't retry the coder, only the fixer
+
+        # Append to progress
+        progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+        status = "passed" if iteration_passed else "failed"
+        with open(progress_file, "a") as f:
+            f.write(f"\n## Iteration {iteration} — {status}\n---\n")
+
+    console.print(
+        f"[yellow]Reached max iterations ({config.ralph.max_iterations}) "
+        "without completion signal[/yellow]"
+    )
+    return False

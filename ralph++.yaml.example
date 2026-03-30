@@ -45,25 +45,6 @@ prd_review:
     {findings}
   max_cycles: 3
 
-# ── Inner review loop (runs after each ralph iteration, inside sandbox) ─
-inner_review:
-  enabled: true
-  reviewer: codex
-  reviewer_prompt: >
-    Review the following git diff against the requirements in prd.json.
-    Identify any flaws, omissions or regressions introduced by these changes.
-    If everything looks correct, output exactly: LGTM
-
-    GIT DIFF:
-    {diff}
-  fixer: claude
-  fixer_prompt: >
-    The following issues were found in the latest code changes.
-    Please fix them and ensure all tests pass:
-
-    {findings}
-  max_cycles: 2
-
 # ── Post-run review loop ───────────────────────────────────────────────
 post_review:
   reviewer: codex
@@ -81,9 +62,48 @@ post_review:
 
 # ── Ralph sandbox ──────────────────────────────────────────────────────
 ralph:
+  mode: delegated                  # delegated | orchestrated (override with --mode)
   max_iterations: 20
-  sandbox_image: ralph-sandbox
-  ralph_script: scripts/ralph/ralph-reviewed.sh
+  sandbox_dir: ../ralph-sandbox    # path to ralph-sandbox checkout
+  sandbox_tool: claude             # tool for sandbox (delegated mode): claude | codex
+  session_runner: scripts/ralph-single-step.sh  # session runner for orchestrated mode
+
+# ── Orchestrated mode settings ─────────────────────────────────────────
+# Only used when ralph.mode is "orchestrated"
+orchestrated:
+  coder: claude                    # tool for coding iterations (must match a key in tools section)
+  reviewer: codex                  # tool for reviewing each iteration's output
+  fixer: claude                    # tool for fixing review failures (used when backout_on_failure: false)
+  max_iteration_retries: 2
+  run_tests_between_steps: false
+  test_commands:
+    - "pytest"
+    - "ruff check ."
+  backout_on_failure: true         # true: git reset + retry iteration; false: invoke fixer to fix in-place
+
+  # Review prompt — sent to the reviewer after each iteration.
+  # Placeholders: {diff} (git diff of iteration), {prd_file} (path to prd.json)
+  review_prompt: >
+    Review the following git diff against the requirements in {prd_file}.
+    Identify any flaws, omissions, regressions, or test failures.
+    If everything looks correct, output exactly: LGTM
+
+    GIT DIFF:
+    {diff}
+
+  # Fix prompt — sent to the fixer when review fails and backout_on_failure is false.
+  # Placeholders: {findings} (reviewer output), {prd_file} (path to prd.json)
+  fix_prompt: >
+    The following issues were found in the latest code changes against {prd_file}.
+    Please fix them and ensure all tests pass:
+
+    {findings}
+
+  # Optional: custom per-iteration prompt for the coder. If unset, uses upstream CLAUDE.md.
+  # Placeholders: {iteration}, {prd_file}, {progress}, {review_findings}
+  # prompt_template: |
+  #   You are implementing iteration {iteration}. The PRD is at {prd_file}.
+  #   Previous review findings: {review_findings}
 
 # ── Lifecycle hooks ────────────────────────────────────────────────────
 hooks:

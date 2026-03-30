@@ -32,8 +32,32 @@ class ReviewConfig:
 @dataclass
 class RalphConfig:
     max_iterations: int = 20
-    sandbox_image: str = "ralph-sandbox"
-    ralph_script: str = "scripts/ralph/ralph-reviewed.sh"
+    mode: str = "delegated"              # "delegated" | "orchestrated"
+    sandbox_dir: str = ""                # path to ralph-sandbox checkout
+    sandbox_tool: str = "claude"         # tool for sandbox (delegated mode): claude | codex
+    session_runner: str = "scripts/ralph-single-step.sh"  # session runner for orchestrated mode
+
+
+@dataclass
+class OrchestratedConfig:
+    coder: str = "claude"
+    reviewer: str = "codex"
+    fixer: str = "claude"
+    max_iteration_retries: int = 2
+    run_tests_between_steps: bool = False
+    test_commands: list[str] = field(default_factory=list)
+    backout_on_failure: bool = True
+    review_prompt: str = (
+        "Review the following git diff against the requirements in {prd_file}.\n"
+        "Identify any flaws, omissions, regressions, or test failures.\n"
+        "If everything looks correct, output exactly: LGTM\n\n"
+        "GIT DIFF:\n{diff}"
+    )
+    fix_prompt: str = (
+        "The following issues were found in the latest code changes against {prd_file}.\n"
+        "Please fix them and ensure all tests pass:\n\n{findings}"
+    )
+    prompt_template: str | None = None
 
 
 @dataclass
@@ -57,6 +81,9 @@ class Config:
 
     # Ralph
     ralph: RalphConfig = field(default_factory=RalphConfig)
+
+    # Orchestrated mode
+    orchestrated: OrchestratedConfig = field(default_factory=OrchestratedConfig)
 
     # Hooks
     hooks: dict[str, list[str]] = field(default_factory=dict)
@@ -143,8 +170,26 @@ def load_config(path: Path | None, overrides: dict[str, Any] | None = None) -> C
         r = data["ralph"]
         cfg.ralph = RalphConfig(
             max_iterations=int(r.get("max_iterations", 20)),
-            sandbox_image=r.get("sandbox_image", "ralph-sandbox"),
-            ralph_script=r.get("ralph_script", "scripts/ralph/ralph-reviewed.sh"),
+            mode=r.get("mode", "delegated"),
+            sandbox_dir=r.get("sandbox_dir", ""),
+            sandbox_tool=r.get("sandbox_tool", "claude"),
+            session_runner=r.get("session_runner", "scripts/ralph-single-step.sh"),
+        )
+
+    if "orchestrated" in data:
+        o = data["orchestrated"]
+        defaults = OrchestratedConfig()
+        cfg.orchestrated = OrchestratedConfig(
+            coder=o.get("coder", defaults.coder),
+            reviewer=o.get("reviewer", defaults.reviewer),
+            fixer=o.get("fixer", defaults.fixer),
+            max_iteration_retries=int(o.get("max_iteration_retries", defaults.max_iteration_retries)),
+            run_tests_between_steps=bool(o.get("run_tests_between_steps", defaults.run_tests_between_steps)),
+            test_commands=o.get("test_commands", defaults.test_commands),
+            backout_on_failure=bool(o.get("backout_on_failure", defaults.backout_on_failure)),
+            review_prompt=o.get("review_prompt", defaults.review_prompt),
+            fix_prompt=o.get("fix_prompt", defaults.fix_prompt),
+            prompt_template=o.get("prompt_template", defaults.prompt_template),
         )
 
     cfg.hooks = data.get("hooks", {})

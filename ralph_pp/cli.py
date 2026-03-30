@@ -63,6 +63,12 @@ console = Console()
     help="Skip the post-run review loop.",
 )
 @click.option(
+    "--mode", "-m",
+    type=click.Choice(["delegated", "orchestrated"], case_sensitive=False),
+    default=None,
+    help="Workflow mode: 'delegated' (default Ralph loop) or 'orchestrated' (ralph++ controls each iteration).",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -75,6 +81,7 @@ def main(
     claude_config: Path | None,
     codex_config: Path | None,
     max_iters: int | None,
+    mode: str | None,
     skip_prd_review: bool,
     skip_post_review: bool,
     dry_run: bool,
@@ -110,6 +117,8 @@ def main(
     # Apply CLI overrides that need post-load handling
     if max_iters is not None:
         cfg.ralph.max_iterations = max_iters
+    if mode is not None:
+        cfg.ralph.mode = mode
 
     orchestrator = Orchestrator(feature=feature, config=cfg, dry_run=dry_run)
     orchestrator.run(
