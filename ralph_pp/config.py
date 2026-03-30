@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,11 +11,11 @@ import yaml
 
 @dataclass
 class ToolConfig:
-    type: str = "cli"          # cli | shell
+    type: str = "cli"  # cli | shell
     command: str = ""
-    args: list[str] = field(default_factory=list)
-    stdin: str | None = None   # template string sent via stdin
-    env: dict[str, str] = field(default_factory=dict)
+    args: list[str] = field(default_factory=lambda: list[str]())
+    stdin: str | None = None  # template string sent via stdin
+    env: dict[str, str] = field(default_factory=lambda: dict[str, str]())
 
 
 @dataclass
@@ -32,8 +31,32 @@ class ReviewConfig:
 @dataclass
 class RalphConfig:
     max_iterations: int = 20
-    sandbox_image: str = "ralph-sandbox"
-    ralph_script: str = "scripts/ralph/ralph-reviewed.sh"
+    mode: str = "delegated"  # "delegated" | "orchestrated"
+    sandbox_dir: str = ""  # path to ralph-sandbox checkout
+    sandbox_tool: str = "claude"  # tool for sandbox (delegated mode): claude | codex
+    session_runner: str = "scripts/ralph-single-step.sh"  # session runner for orchestrated mode
+
+
+@dataclass
+class OrchestratedConfig:
+    coder: str = "claude"
+    reviewer: str = "codex"
+    fixer: str = "claude"
+    max_iteration_retries: int = 2
+    run_tests_between_steps: bool = False
+    test_commands: list[str] = field(default_factory=lambda: list[str]())
+    backout_on_failure: bool = True
+    review_prompt: str = (
+        "Review the following git diff against the requirements in {prd_file}.\n"
+        "Identify any flaws, omissions, regressions, or test failures.\n"
+        "If everything looks correct, output exactly: LGTM\n\n"
+        "GIT DIFF:\n{diff}"
+    )
+    fix_prompt: str = (
+        "The following issues were found in the latest code changes against {prd_file}.\n"
+        "Please fix them and ensure all tests pass:\n\n{findings}"
+    )
+    prompt_template: str | None = None
 
 
 @dataclass
@@ -48,27 +71,44 @@ class Config:
     branch_suffix_length: int = 4
 
     # Tools
-    tools: dict[str, ToolConfig] = field(default_factory=dict)
+    tools: dict[str, ToolConfig] = field(default_factory=lambda: dict[str, ToolConfig]())
 
     # Review stages
     prd_review: ReviewConfig = field(default_factory=ReviewConfig)
-    inner_review: ReviewConfig = field(default_factory=ReviewConfig)
     post_review: ReviewConfig = field(default_factory=ReviewConfig)
 
     # Ralph
     ralph: RalphConfig = field(default_factory=RalphConfig)
 
+    # Orchestrated mode
+    orchestrated: OrchestratedConfig = field(default_factory=OrchestratedConfig)
+
     # Hooks
-    hooks: dict[str, list[str]] = field(default_factory=dict)
+    hooks: dict[str, list[str]] = field(default_factory=lambda: dict[str, list[str]]())
 
     def get_tool(self, name: str) -> ToolConfig:
         if name not in self.tools:
-            raise ValueError(f"Tool '{name}' not defined in config. Available: {list(self.tools.keys())}")
+            raise ValueError(
+                f"Tool '{name}' not defined in config. Available: {list(self.tools.keys())}"
+            )
         return self.tools[name]
 
 
 def _expand(path: Any) -> Path:
     return Path(str(path)).expanduser().resolve()
+
+
+def _parse_bool(value: Any, default: bool) -> bool:
+    """Parse a boolean value, handling YAML string booleans correctly."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.lower() in ("true", "yes", "1"):
+            return True
+        if value.lower() in ("false", "no", "0"):
+            return False
+        raise ValueError(f"Invalid boolean value: {value!r}")
+    return bool(value)
 
 
 def _parse_review(data: dict[str, Any], defaults: ReviewConfig) -> ReviewConfig:
@@ -78,7 +118,7 @@ def _parse_review(data: dict[str, Any], defaults: ReviewConfig) -> ReviewConfig:
         fixer=data.get("fixer", defaults.fixer),
         fixer_prompt=data.get("fixer_prompt", defaults.fixer_prompt),
         max_cycles=int(data.get("max_cycles", defaults.max_cycles)),
-        enabled=bool(data.get("enabled", defaults.enabled)),
+        enabled=_parse_bool(data.get("enabled", defaults.enabled), defaults.enabled),
     )
 
 
@@ -134,8 +174,6 @@ def load_config(path: Path | None, overrides: dict[str, Any] | None = None) -> C
 
     if "prd_review" in data:
         cfg.prd_review = _parse_review(data["prd_review"], cfg.prd_review)
-    if "inner_review" in data:
-        cfg.inner_review = _parse_review(data["inner_review"], cfg.inner_review)
     if "post_review" in data:
         cfg.post_review = _parse_review(data["post_review"], cfg.post_review)
 
@@ -143,10 +181,82 @@ def load_config(path: Path | None, overrides: dict[str, Any] | None = None) -> C
         r = data["ralph"]
         cfg.ralph = RalphConfig(
             max_iterations=int(r.get("max_iterations", 20)),
-            sandbox_image=r.get("sandbox_image", "ralph-sandbox"),
-            ralph_script=r.get("ralph_script", "scripts/ralph/ralph-reviewed.sh"),
+            mode=r.get("mode", "delegated"),
+            sandbox_dir=r.get("sandbox_dir", ""),
+            sandbox_tool=r.get("sandbox_tool", "claude"),
+            session_runner=r.get("session_runner", "scripts/ralph-single-step.sh"),
+        )
+
+    if "orchestrated" in data:
+        o = data["orchestrated"]
+        defaults = OrchestratedConfig()
+        cfg.orchestrated = OrchestratedConfig(
+            coder=o.get("coder", defaults.coder),
+            reviewer=o.get("reviewer", defaults.reviewer),
+            fixer=o.get("fixer", defaults.fixer),
+            max_iteration_retries=int(
+                o.get("max_iteration_retries", defaults.max_iteration_retries)
+            ),
+            run_tests_between_steps=_parse_bool(
+                o.get("run_tests_between_steps", defaults.run_tests_between_steps),
+                defaults.run_tests_between_steps,
+            ),
+            test_commands=o.get("test_commands", defaults.test_commands),
+            backout_on_failure=_parse_bool(
+                o.get("backout_on_failure", defaults.backout_on_failure),
+                defaults.backout_on_failure,
+            ),
+            review_prompt=o.get("review_prompt", defaults.review_prompt),
+            fix_prompt=o.get("fix_prompt", defaults.fix_prompt),
+            prompt_template=o.get("prompt_template", defaults.prompt_template),
         )
 
     cfg.hooks = data.get("hooks", {})
 
+    validate_config(cfg)
     return cfg
+
+
+def validate_config(cfg: Config) -> None:
+    """Validate config values that would otherwise cause confusing runtime errors."""
+    errors: list[str] = []
+
+    valid_modes = {"delegated", "orchestrated"}
+    if cfg.ralph.mode not in valid_modes:
+        errors.append(f"ralph.mode={cfg.ralph.mode!r} not in {valid_modes}")
+
+    if cfg.ralph.sandbox_tool not in cfg.tools:
+        errors.append(
+            f"ralph.sandbox_tool={cfg.ralph.sandbox_tool!r} not in tools {list(cfg.tools)}"
+        )
+
+    for attr in ("coder", "reviewer", "fixer"):
+        name = getattr(cfg.orchestrated, attr)
+        if name not in cfg.tools:
+            errors.append(f"orchestrated.{attr}={name!r} not in tools {list(cfg.tools)}")
+
+    for stage_name, review_cfg in [
+        ("prd_review", cfg.prd_review),
+        ("post_review", cfg.post_review),
+    ]:
+        if not review_cfg.enabled:
+            continue
+        if review_cfg.reviewer not in cfg.tools:
+            errors.append(
+                f"{stage_name}.reviewer={review_cfg.reviewer!r} not in tools {list(cfg.tools)}"
+            )
+        if review_cfg.fixer not in cfg.tools:
+            errors.append(f"{stage_name}.fixer={review_cfg.fixer!r} not in tools {list(cfg.tools)}")
+
+    if not isinstance(cfg.orchestrated.test_commands, list):
+        errors.append(
+            "orchestrated.test_commands must be a list, "
+            f"got {type(cfg.orchestrated.test_commands).__name__}"
+        )
+    elif cfg.orchestrated.run_tests_between_steps:
+        for i, cmd in enumerate(cfg.orchestrated.test_commands):
+            if not isinstance(cmd, str) or not cmd.strip():
+                errors.append(f"orchestrated.test_commands[{i}] is empty or not a string")
+
+    if errors:
+        raise ValueError("Config validation failed:\n  " + "\n  ".join(errors))

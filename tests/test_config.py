@@ -1,10 +1,19 @@
 """Tests for config loading."""
 
-from pathlib import Path
 import tempfile
+from pathlib import Path
+
 import yaml
 
-from ralph_pp.config import load_config, Config
+from ralph_pp.config import (
+    Config,
+    OrchestratedConfig,
+    RalphConfig,
+    ToolConfig,
+    _parse_bool,
+    load_config,
+    validate_config,
+)
 
 
 def test_load_empty_config():
@@ -14,6 +23,8 @@ def test_load_empty_config():
     assert cfg.branch_prefix == "ralph/"
     assert cfg.branch_suffix_length == 4
     assert cfg.ralph.max_iterations == 20
+    assert cfg.ralph.mode == "delegated"
+    assert cfg.ralph.sandbox_tool == "claude"
     assert "codex" in cfg.tools
     assert "claude" in cfg.tools
 
@@ -23,7 +34,12 @@ def test_load_config_from_file():
     data = {
         "branch_prefix": "feature/",
         "branch_suffix_length": 6,
-        "ralph": {"max_iterations": 30, "sandbox_image": "my-sandbox"},
+        "ralph": {
+            "max_iterations": 30,
+            "mode": "orchestrated",
+            "sandbox_dir": "/path/to/sandbox",
+            "sandbox_tool": "codex",
+        },
         "hooks": {"post_worktree_create": ["echo hello"]},
     }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -34,7 +50,9 @@ def test_load_config_from_file():
     assert cfg.branch_prefix == "feature/"
     assert cfg.branch_suffix_length == 6
     assert cfg.ralph.max_iterations == 30
-    assert cfg.ralph.sandbox_image == "my-sandbox"
+    assert cfg.ralph.mode == "orchestrated"
+    assert cfg.ralph.sandbox_dir == "/path/to/sandbox"
+    assert cfg.ralph.sandbox_tool == "codex"
     assert cfg.hooks["post_worktree_create"] == ["echo hello"]
     tmp_path.unlink()
 
@@ -59,3 +77,182 @@ def test_get_tool_raises_on_unknown():
         assert False, "Should have raised"
     except ValueError:
         pass
+
+
+def test_default_mode_is_delegated():
+    """Default workflow mode is delegated."""
+    cfg = load_config(None)
+    assert cfg.ralph.mode == "delegated"
+
+
+def test_default_orchestrated_config():
+    """OrchestratedConfig has sensible defaults."""
+    cfg = load_config(None)
+    orch = cfg.orchestrated
+    assert isinstance(orch, OrchestratedConfig)
+    assert orch.coder == "claude"
+    assert orch.reviewer == "codex"
+    assert orch.fixer == "claude"
+    assert orch.max_iteration_retries == 2
+    assert orch.run_tests_between_steps is False
+    assert orch.test_commands == []
+    assert orch.backout_on_failure is True
+    assert "{diff}" in orch.review_prompt
+    assert "{findings}" in orch.fix_prompt
+    assert orch.prompt_template is None
+
+
+def test_load_orchestrated_config():
+    """Orchestrated config section is parsed from YAML."""
+    data = {
+        "orchestrated": {
+            "coder": "codex",
+            "reviewer": "claude",
+            "fixer": "codex",
+            "max_iteration_retries": 5,
+            "run_tests_between_steps": True,
+            "test_commands": ["pytest", "mypy ."],
+            "backout_on_failure": False,
+            "review_prompt": "custom review: {diff}",
+            "fix_prompt": "custom fix: {findings}",
+            "prompt_template": "iteration {iteration}",
+        },
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp_path = Path(f.name)
+
+    cfg = load_config(tmp_path)
+    orch = cfg.orchestrated
+    assert orch.coder == "codex"
+    assert orch.reviewer == "claude"
+    assert orch.fixer == "codex"
+    assert orch.max_iteration_retries == 5
+    assert orch.run_tests_between_steps is True
+    assert orch.test_commands == ["pytest", "mypy ."]
+    assert orch.backout_on_failure is False
+    assert orch.review_prompt == "custom review: {diff}"
+    assert orch.fix_prompt == "custom fix: {findings}"
+    assert orch.prompt_template == "iteration {iteration}"
+    tmp_path.unlink()
+
+
+# ── _parse_bool tests ──────────────────────────────────────────────────
+
+
+def test_parse_bool_native_true():
+    assert _parse_bool(True, False) is True
+
+
+def test_parse_bool_native_false():
+    assert _parse_bool(False, True) is False
+
+
+def test_parse_bool_string_false():
+    """Quoted YAML 'false' must not become True."""
+    assert _parse_bool("false", True) is False
+
+
+def test_parse_bool_string_true():
+    assert _parse_bool("true", False) is True
+
+
+def test_parse_bool_string_yes():
+    assert _parse_bool("yes", False) is True
+
+
+def test_parse_bool_string_no():
+    assert _parse_bool("no", True) is False
+
+
+def test_parse_bool_invalid_string():
+    import pytest
+
+    with pytest.raises(ValueError, match="Invalid boolean"):
+        _parse_bool("maybe", False)
+
+
+# ── validate_config tests ─────────────────────────────────────────────
+
+
+def test_validate_config_bad_mode():
+    import pytest
+
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        ralph=RalphConfig(mode="invalid"),
+    )
+    with pytest.raises(ValueError, match="ralph.mode"):
+        validate_config(cfg)
+
+
+def test_validate_config_bad_sandbox_tool():
+    import pytest
+
+    cfg = Config(
+        tools={"claude": ToolConfig()},
+        ralph=RalphConfig(sandbox_tool="nonexistent"),
+    )
+    with pytest.raises(ValueError, match="ralph.sandbox_tool"):
+        validate_config(cfg)
+
+
+def test_validate_config_bad_orchestrated_coder():
+    import pytest
+
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        orchestrated=OrchestratedConfig(coder="nonexistent"),
+    )
+    with pytest.raises(ValueError, match="orchestrated.coder"):
+        validate_config(cfg)
+
+
+def test_validate_config_valid():
+    """A valid config should not raise."""
+    cfg = load_config(None)
+    validate_config(cfg)  # should not raise
+
+
+def test_load_config_string_false_boolean():
+    """Quoted 'false' in YAML should parse as False, not True."""
+    data = {
+        "orchestrated": {
+            "backout_on_failure": "false",
+            "run_tests_between_steps": "false",
+        },
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp_path = Path(f.name)
+
+    cfg = load_config(tmp_path)
+    assert cfg.orchestrated.backout_on_failure is False
+    assert cfg.orchestrated.run_tests_between_steps is False
+    tmp_path.unlink()
+
+
+def test_validate_config_empty_test_command():
+    import pytest
+
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        orchestrated=OrchestratedConfig(
+            run_tests_between_steps=True,
+            test_commands=["pytest", ""],
+        ),
+    )
+    with pytest.raises(ValueError, match="test_commands"):
+        validate_config(cfg)
+
+
+def test_validate_config_test_commands_not_checked_when_disabled():
+    """Empty test_commands entries are fine when run_tests_between_steps is False."""
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        orchestrated=OrchestratedConfig(
+            run_tests_between_steps=False,
+            test_commands=[""],
+        ),
+    )
+    validate_config(cfg)  # should not raise

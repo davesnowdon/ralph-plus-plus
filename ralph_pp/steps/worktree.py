@@ -6,8 +6,8 @@ import secrets
 import subprocess
 from pathlib import Path
 
-from slugify import slugify
 from rich.console import Console
+from slugify import slugify
 
 from ..config import Config
 
@@ -17,7 +17,7 @@ console = Console()
 def make_branch_name(feature: str, config: Config) -> str:
     """Derive a unique branch name from the feature description."""
     slug = slugify(feature, max_length=50, separator="-")
-    suffix = secrets.token_hex(config.branch_suffix_length // 2)[:config.branch_suffix_length]
+    suffix = secrets.token_hex(config.branch_suffix_length // 2)[: config.branch_suffix_length]
     return f"{config.branch_prefix}{slug}-{suffix}"
 
 
@@ -65,7 +65,7 @@ def cleanup_git_config(worktree_path: Path) -> None:
         text=True,
         capture_output=True,
     )
-    user_lines = [l for l in result.stdout.splitlines() if l.startswith("user.")]
+    user_lines = [line for line in result.stdout.splitlines() if line.startswith("user.")]
     if user_lines:
         console.print(f"[yellow]Remaining user config:[/yellow] {user_lines}")
     else:

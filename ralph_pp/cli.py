@@ -15,18 +15,21 @@ console = Console()
 
 @click.command()
 @click.option(
-    "--feature", "-f",
+    "--feature",
+    "-f",
     required=True,
     help="Feature description (used to name the branch and generate the PRD).",
 )
 @click.option(
-    "--repo", "-r",
+    "--repo",
+    "-r",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=None,
     help="Path to the git repository. Defaults to current directory.",
 )
 @click.option(
-    "--config", "-c",
+    "--config",
+    "-c",
     "config_file",
     type=click.Path(exists=False, dir_okay=False, path_type=Path),
     default=None,
@@ -63,6 +66,14 @@ console = Console()
     help="Skip the post-run review loop.",
 )
 @click.option(
+    "--mode",
+    "-m",
+    type=click.Choice(["delegated", "orchestrated"], case_sensitive=False),
+    default=None,
+    help="Workflow mode: 'delegated' (default Ralph loop) "
+    "or 'orchestrated' (ralph++ controls each iteration).",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -75,6 +86,7 @@ def main(
     claude_config: Path | None,
     codex_config: Path | None,
     max_iters: int | None,
+    mode: str | None,
     skip_prd_review: bool,
     skip_post_review: bool,
     dry_run: bool,
@@ -95,7 +107,7 @@ def main(
                 break
 
     # Build overrides from CLI flags
-    overrides: dict = {}
+    overrides: dict[str, object] = {}
     if repo:
         overrides["repo_path"] = repo
     elif repo is None:
@@ -110,6 +122,8 @@ def main(
     # Apply CLI overrides that need post-load handling
     if max_iters is not None:
         cfg.ralph.max_iterations = max_iters
+    if mode is not None:
+        cfg.ralph.mode = mode
 
     orchestrator = Orchestrator(feature=feature, config=cfg, dry_run=dry_run)
     orchestrator.run(

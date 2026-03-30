@@ -33,19 +33,26 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
 
         review_prompt = review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_json))
         result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
+        if not result.success:
+            raise RuntimeError(
+                f"Post-run reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+            )
 
         if result.is_lgtm:
             console.print("[green]✓ Post-run review passed (LGTM)[/green]")
             return
 
         console.print(f"[yellow]Issues found in cycle {cycle} — running fix pass...[/yellow]")
-        fix_prompt = (
-            review_cfg.fixer_prompt
-            .replace("{prd_file}", str(prd_json))
-            .replace("{findings}", result.output)
+        fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_json)).replace(
+            "{findings}", result.output
         )
-        fixer.run(prompt=fix_prompt, cwd=worktree_path)
+        fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
+        if not fix_result.success:
+            raise RuntimeError(
+                f"Post-run fixer failed (exit {fix_result.exit_code}): {fix_result.output[:200]}"
+            )
 
     console.print(
-        f"[yellow]⚠ Post-run review: max cycles ({review_cfg.max_cycles}) reached — continuing[/yellow]"
+        f"[yellow]⚠ Post-run review: max cycles ({review_cfg.max_cycles}) "
+        "reached — continuing[/yellow]"
     )

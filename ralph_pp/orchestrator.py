@@ -10,10 +10,10 @@ from rich.rule import Rule
 
 from .config import Config
 from .hooks import run_hooks
-from .steps.worktree import create_worktree, cleanup_git_config
-from .steps.prd import generate_prd, review_prd_loop, convert_prd_to_json
-from .steps.sandbox import run_sandbox
 from .steps.post_review import post_review_loop
+from .steps.prd import convert_prd_to_json, generate_prd, review_prd_loop
+from .steps.sandbox import run_sandbox
+from .steps.worktree import cleanup_git_config, create_worktree
 
 console = Console()
 
@@ -50,7 +50,12 @@ class Orchestrator:
             raise
 
         console.print(Rule(style="green"))
-        summary = "✓ ralph++ complete!\nBranch: " + str(self.branch) + "\nWorktree: " + str(self.worktree_path)
+        summary = (
+            "✓ ralph++ complete!\nBranch: "
+            + str(self.branch)
+            + "\nWorktree: "
+            + str(self.worktree_path)
+        )
         console.print(Panel.fit(summary, border_style="green"))
 
     # ── Steps ──────────────────────────────────────────────────────────
@@ -72,7 +77,8 @@ class Orchestrator:
 
     def _step_sandbox(self) -> None:
         assert self.worktree_path is not None
-        console.print(Rule("[bold]3 · Ralph Sandbox[/bold]"))
+        mode = self.config.ralph.mode
+        console.print(Rule(f"[bold]3 · Ralph Sandbox ({mode} mode)[/bold]"))
         run_hooks("pre_sandbox", self.config.hooks, self.worktree_path)
         success = run_sandbox(self.worktree_path, self.config)
         run_hooks("post_sandbox", self.config.hooks, self.worktree_path)

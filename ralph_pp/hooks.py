@@ -27,6 +27,4 @@ def run_hooks(hook_name: str, hooks: dict[str, list[str]], cwd: Path) -> None:
             capture_output=False,
         )
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Hook command failed (exit {result.returncode}): {cmd}"
-            )
+            raise RuntimeError(f"Hook command failed (exit {result.returncode}): {cmd}")
