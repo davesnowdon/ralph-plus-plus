@@ -365,6 +365,13 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         )
                         break
 
+                    # Re-run tests after fix (if enabled)
+                    if orch.run_tests_between_steps and orch.test_commands:
+                        console.print("  [dim]Re-running test commands after fix...[/dim]")
+                        if not _run_test_commands(worktree_path, orch.test_commands):
+                            console.print("  [yellow]Tests still failing after fix[/yellow]")
+                            continue
+
                     # Re-review after fix
                     diff = _get_diff(worktree_path, pre_sha)
                     passed, findings = _review_iteration(iteration, diff, worktree_path, config)

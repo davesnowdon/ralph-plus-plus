@@ -98,6 +98,19 @@ def _expand(path: Any) -> Path:
     return Path(str(path)).expanduser().resolve()
 
 
+def _parse_bool(value: Any, default: bool) -> bool:
+    """Parse a boolean value, handling YAML string booleans correctly."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.lower() in ("true", "yes", "1"):
+            return True
+        if value.lower() in ("false", "no", "0"):
+            return False
+        raise ValueError(f"Invalid boolean value: {value!r}")
+    return bool(value)
+
+
 def _parse_review(data: dict[str, Any], defaults: ReviewConfig) -> ReviewConfig:
     return ReviewConfig(
         reviewer=data.get("reviewer", defaults.reviewer),
@@ -105,7 +118,7 @@ def _parse_review(data: dict[str, Any], defaults: ReviewConfig) -> ReviewConfig:
         fixer=data.get("fixer", defaults.fixer),
         fixer_prompt=data.get("fixer_prompt", defaults.fixer_prompt),
         max_cycles=int(data.get("max_cycles", defaults.max_cycles)),
-        enabled=bool(data.get("enabled", defaults.enabled)),
+        enabled=_parse_bool(data.get("enabled", defaults.enabled), defaults.enabled),
     )
 
 
@@ -184,9 +197,15 @@ def load_config(path: Path | None, overrides: dict[str, Any] | None = None) -> C
             reviewer=o.get("reviewer", defaults.reviewer),
             fixer=o.get("fixer", defaults.fixer),
             max_iteration_retries=int(o.get("max_iteration_retries", defaults.max_iteration_retries)),
-            run_tests_between_steps=bool(o.get("run_tests_between_steps", defaults.run_tests_between_steps)),
+            run_tests_between_steps=_parse_bool(
+                o.get("run_tests_between_steps", defaults.run_tests_between_steps),
+                defaults.run_tests_between_steps,
+            ),
             test_commands=o.get("test_commands", defaults.test_commands),
-            backout_on_failure=bool(o.get("backout_on_failure", defaults.backout_on_failure)),
+            backout_on_failure=_parse_bool(
+                o.get("backout_on_failure", defaults.backout_on_failure),
+                defaults.backout_on_failure,
+            ),
             review_prompt=o.get("review_prompt", defaults.review_prompt),
             fix_prompt=o.get("fix_prompt", defaults.fix_prompt),
             prompt_template=o.get("prompt_template", defaults.prompt_template),
@@ -194,4 +213,44 @@ def load_config(path: Path | None, overrides: dict[str, Any] | None = None) -> C
 
     cfg.hooks = data.get("hooks", {})
 
+    validate_config(cfg)
     return cfg
+
+
+def validate_config(cfg: Config) -> None:
+    """Validate config values that would otherwise cause confusing runtime errors."""
+    errors: list[str] = []
+
+    valid_modes = {"delegated", "orchestrated"}
+    if cfg.ralph.mode not in valid_modes:
+        errors.append(f"ralph.mode={cfg.ralph.mode!r} not in {valid_modes}")
+
+    if cfg.ralph.sandbox_tool not in cfg.tools:
+        errors.append(
+            f"ralph.sandbox_tool={cfg.ralph.sandbox_tool!r} not in tools {list(cfg.tools)}"
+        )
+
+    for attr in ("coder", "reviewer", "fixer"):
+        name = getattr(cfg.orchestrated, attr)
+        if name not in cfg.tools:
+            errors.append(
+                f"orchestrated.{attr}={name!r} not in tools {list(cfg.tools)}"
+            )
+
+    for stage_name, review_cfg in [
+        ("prd_review", cfg.prd_review),
+        ("post_review", cfg.post_review),
+    ]:
+        if not review_cfg.enabled:
+            continue
+        if review_cfg.reviewer not in cfg.tools:
+            errors.append(
+                f"{stage_name}.reviewer={review_cfg.reviewer!r} not in tools {list(cfg.tools)}"
+            )
+        if review_cfg.fixer not in cfg.tools:
+            errors.append(
+                f"{stage_name}.fixer={review_cfg.fixer!r} not in tools {list(cfg.tools)}"
+            )
+
+    if errors:
+        raise ValueError("Config validation failed:\n  " + "\n  ".join(errors))

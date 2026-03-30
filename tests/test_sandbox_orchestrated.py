@@ -218,3 +218,98 @@ class TestTestFailureBlocking:
             result = _run_orchestrated(worktree, config)
 
         assert result is False, "Iteration should not be accepted when tests fail"
+
+
+class TestFixInPlaceTestRerun:
+    """Finding 1 (round 2): tests must be re-run after fixer in fix-in-place mode."""
+
+    def test_fixer_passes_but_tests_still_fail_not_accepted(self, tmp_path):
+        """Fixer succeeds, but tests still fail — iteration should not be accepted."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=2,
+            backout_on_failure=False,
+            run_tests=True, test_commands=["pytest"],
+        )
+
+        test_call_count = 0
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return (False, "Issues found")
+
+        def mock_fixer(findings, worktree_path, config):
+            return _fake_subprocess_run(returncode=0, stdout="fixed")
+
+        def mock_test_commands(worktree_path, commands):
+            nonlocal test_call_count
+            test_call_count += 1
+            return False  # tests always fail
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
+            patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
+            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False
+        # Tests should have been called: once before initial review + once per fix cycle
+        assert test_call_count >= 2, "Tests should be re-run after fixer"
+
+    def test_fixer_passes_tests_pass_reviewer_accepts(self, tmp_path):
+        """Fixer succeeds, tests pass after fix, reviewer LGTM — iteration accepted."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=2,
+            backout_on_failure=False,
+            run_tests=True, test_commands=["pytest"],
+        )
+
+        test_call_count = 0
+        review_call_count = 0
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            nonlocal review_call_count
+            review_call_count += 1
+            if review_call_count == 1:
+                return (False, "Issues found")
+            return (True, "LGTM")
+
+        def mock_fixer(findings, worktree_path, config):
+            return _fake_subprocess_run(returncode=0, stdout="fixed")
+
+        def mock_test_commands(worktree_path, commands):
+            nonlocal test_call_count
+            test_call_count += 1
+            if test_call_count == 1:
+                return False  # initial tests fail
+            return True  # tests pass after fix
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
+            patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
+            patch("ralph_pp.steps.sandbox._session_runner_path", return_value=tmp_path / "scripts" / "ralph-single-step.sh"),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False  # no COMPLETE signal, but iteration should have passed
+        assert test_call_count == 2, "Tests should be called initially and after fix"
+        assert review_call_count == 2, "Reviewer should be called after tests pass"

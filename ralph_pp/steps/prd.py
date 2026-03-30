@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from rich.console import Console
@@ -55,6 +56,10 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
 
         review_prompt = review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_file))
         result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
+        if not result.success:
+            raise RuntimeError(
+                f"PRD reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+            )
 
         if result.is_lgtm:
             console.print("[green]✓ PRD review passed (LGTM)[/green]")
@@ -66,7 +71,11 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
             .replace("{prd_file}", str(prd_file))
             .replace("{findings}", result.output)
         )
-        fixer.run(prompt=fix_prompt, cwd=worktree_path)
+        fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
+        if not fix_result.success:
+            raise RuntimeError(
+                f"PRD fixer failed (exit {fix_result.exit_code}): {fix_result.output[:200]}"
+            )
 
     console.print(
         f"[yellow]⚠ PRD review: max cycles ({review_cfg.max_cycles}) reached — continuing[/yellow]"
@@ -93,5 +102,9 @@ def convert_prd_to_json(prd_file: Path, worktree_path: Path, config: Config) -> 
         raise RuntimeError(
             f"PRD conversion succeeded (exit 0) but {prd_json} was not created"
         )
+    try:
+        json.loads(prd_json.read_text())
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"prd.json is not valid JSON: {e}") from e
     console.print(f"[green]✓ prd.json generated:[/green] {prd_json}")
     return prd_json

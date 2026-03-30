@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import yaml
 
-from ralph_pp.config import load_config, Config, OrchestratedConfig
+from ralph_pp.config import load_config, validate_config, _parse_bool, Config, ToolConfig, OrchestratedConfig, RalphConfig
 
 
 def test_load_empty_config():
@@ -125,4 +125,95 @@ def test_load_orchestrated_config():
     assert orch.review_prompt == "custom review: {diff}"
     assert orch.fix_prompt == "custom fix: {findings}"
     assert orch.prompt_template == "iteration {iteration}"
+    tmp_path.unlink()
+
+
+# ── _parse_bool tests ──────────────────────────────────────────────────
+
+
+def test_parse_bool_native_true():
+    assert _parse_bool(True, False) is True
+
+
+def test_parse_bool_native_false():
+    assert _parse_bool(False, True) is False
+
+
+def test_parse_bool_string_false():
+    """Quoted YAML 'false' must not become True."""
+    assert _parse_bool("false", True) is False
+
+
+def test_parse_bool_string_true():
+    assert _parse_bool("true", False) is True
+
+
+def test_parse_bool_string_yes():
+    assert _parse_bool("yes", False) is True
+
+
+def test_parse_bool_string_no():
+    assert _parse_bool("no", True) is False
+
+
+def test_parse_bool_invalid_string():
+    import pytest
+    with pytest.raises(ValueError, match="Invalid boolean"):
+        _parse_bool("maybe", False)
+
+
+# ── validate_config tests ─────────────────────────────────────────────
+
+
+def test_validate_config_bad_mode():
+    import pytest
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        ralph=RalphConfig(mode="invalid"),
+    )
+    with pytest.raises(ValueError, match="ralph.mode"):
+        validate_config(cfg)
+
+
+def test_validate_config_bad_sandbox_tool():
+    import pytest
+    cfg = Config(
+        tools={"claude": ToolConfig()},
+        ralph=RalphConfig(sandbox_tool="nonexistent"),
+    )
+    with pytest.raises(ValueError, match="ralph.sandbox_tool"):
+        validate_config(cfg)
+
+
+def test_validate_config_bad_orchestrated_coder():
+    import pytest
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        orchestrated=OrchestratedConfig(coder="nonexistent"),
+    )
+    with pytest.raises(ValueError, match="orchestrated.coder"):
+        validate_config(cfg)
+
+
+def test_validate_config_valid():
+    """A valid config should not raise."""
+    cfg = load_config(None)
+    validate_config(cfg)  # should not raise
+
+
+def test_load_config_string_false_boolean():
+    """Quoted 'false' in YAML should parse as False, not True."""
+    data = {
+        "orchestrated": {
+            "backout_on_failure": "false",
+            "run_tests_between_steps": "false",
+        },
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp_path = Path(f.name)
+
+    cfg = load_config(tmp_path)
+    assert cfg.orchestrated.backout_on_failure is False
+    assert cfg.orchestrated.run_tests_between_steps is False
     tmp_path.unlink()

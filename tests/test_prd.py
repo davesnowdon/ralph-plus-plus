@@ -94,3 +94,39 @@ class TestConvertPrdToJson:
 
             result = convert_prd_to_json(prd_file, tmp_path, config)
             assert result == prd_json
+
+    def test_raises_when_json_invalid(self, tmp_path):
+        """Exit 0 with malformed prd.json should raise."""
+        config = _make_config()
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text("this is not json {{{")
+
+        fake_result = ToolResult(output="Done", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            mock_tool = MagicMock()
+            mock_tool.run.return_value = fake_result
+            mock_make.return_value = mock_tool
+
+            with pytest.raises(RuntimeError, match="not valid JSON"):
+                convert_prd_to_json(prd_file, tmp_path, config)
+
+    def test_raises_when_json_empty(self, tmp_path):
+        """Exit 0 with empty prd.json should raise."""
+        config = _make_config()
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text("")
+
+        fake_result = ToolResult(output="Done", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            mock_tool = MagicMock()
+            mock_tool.run.return_value = fake_result
+            mock_make.return_value = mock_tool
+
+            with pytest.raises(RuntimeError, match="not valid JSON"):
+                convert_prd_to_json(prd_file, tmp_path, config)
