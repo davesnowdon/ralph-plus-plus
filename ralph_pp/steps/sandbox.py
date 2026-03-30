@@ -87,6 +87,10 @@ def _get_head_sha(worktree_path: Path) -> str:
         ["git", "rev-parse", "HEAD"],
         cwd=worktree_path, capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git rev-parse HEAD failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
     return result.stdout.strip()
 
 
@@ -122,6 +126,10 @@ def _get_diff(worktree_path: Path, from_sha: str) -> str:
         ["git", "diff", from_sha, "HEAD"],
         cwd=worktree_path, capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git diff failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
     return result.stdout or "(no diff)"
 
 
@@ -195,6 +203,10 @@ def _review_iteration(
 
     review_prompt = _render_prompt(orch.review_prompt, diff=diff, prd_file=prd_file)
     result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
+    if not result.success:
+        raise RuntimeError(
+            f"Iteration reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+        )
 
     if result.is_lgtm:
         console.print(f"  [green]✓ Review passed (LGTM) — iteration {iteration}[/green]")

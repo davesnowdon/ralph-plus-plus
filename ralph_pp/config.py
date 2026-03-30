@@ -76,7 +76,6 @@ class Config:
 
     # Review stages
     prd_review: ReviewConfig = field(default_factory=ReviewConfig)
-    inner_review: ReviewConfig = field(default_factory=ReviewConfig)
     post_review: ReviewConfig = field(default_factory=ReviewConfig)
 
     # Ralph
@@ -174,8 +173,6 @@ def load_config(path: Path | None, overrides: dict[str, Any] | None = None) -> C
 
     if "prd_review" in data:
         cfg.prd_review = _parse_review(data["prd_review"], cfg.prd_review)
-    if "inner_review" in data:
-        cfg.inner_review = _parse_review(data["inner_review"], cfg.inner_review)
     if "post_review" in data:
         cfg.post_review = _parse_review(data["post_review"], cfg.post_review)
 
