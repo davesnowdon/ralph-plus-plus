@@ -37,6 +37,15 @@ def test_load_empty_config():
     assert "claude" in cfg.tools
     assert "claude-interactive" in cfg.tools
     assert cfg.tools["claude-interactive"].interactive is True
+    assert cfg.tools["claude-interactive"].allowed_tools == [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash(git:*)",
+    ]
+    assert "-p" not in cfg.tools["claude-interactive"].args
     assert cfg.tools["claude"].interactive is False
 
 
@@ -362,14 +371,15 @@ def test_validate_config_bad_prd_tool():
 
 
 def test_interactive_field_from_yaml():
-    """interactive field in tools YAML should be parsed correctly."""
+    """interactive and allowed_tools fields in tools YAML should be parsed correctly."""
     data = {
         "tools": {
             "claude": {"command": "claude", "args": ["--print"]},
             "claude-interactive": {
                 "command": "claude",
-                "args": ["-p", "{prompt}"],
+                "args": ["{prompt}"],
                 "interactive": True,
+                "allowed_tools": ["Read", "Write", "Edit"],
             },
             "codex": {"command": "codex", "args": ["{prompt}"]},
             "batch-tool": {
@@ -384,7 +394,9 @@ def test_interactive_field_from_yaml():
 
     cfg = load_config(tmp_path)
     assert cfg.tools["claude-interactive"].interactive is True
+    assert cfg.tools["claude-interactive"].allowed_tools == ["Read", "Write", "Edit"]
     assert cfg.tools["batch-tool"].interactive is False
+    assert cfg.tools["batch-tool"].allowed_tools == []
     assert cfg.tools["claude"].interactive is False
     tmp_path.unlink()
 

@@ -15,7 +15,10 @@ def _make_config():
     return Config(
         tools={
             "claude-interactive": ToolConfig(
-                command="claude", args=["-p", "{prompt}"], interactive=True
+                command="claude",
+                args=["{prompt}"],
+                interactive=True,
+                allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"],
             ),
         }
     )

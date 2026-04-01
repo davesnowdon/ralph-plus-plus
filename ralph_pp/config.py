@@ -160,6 +160,7 @@ class ToolConfig:
     stdin: str | None = None  # template string sent via stdin
     env: dict[str, str] = field(default_factory=lambda: dict[str, str]())
     interactive: bool = False  # if True, stdin/stdout pass through to terminal
+    allowed_tools: list[str] = field(default_factory=lambda: list[str]())  # --allowedTools
 
 
 @dataclass
@@ -286,6 +287,7 @@ def _parse_tools(data: dict[str, Any]) -> dict[str, ToolConfig]:
             stdin=cfg.get("stdin"),
             env=cfg.get("env", {}),
             interactive=_parse_bool(cfg.get("interactive", False), False),
+            allowed_tools=cfg.get("allowed_tools", []),
         )
     return tools
 
@@ -462,8 +464,9 @@ def _build_config(data: dict[str, Any]) -> Config:
             "claude-interactive": ToolConfig(
                 type="cli",
                 command="claude",
-                args=["-p", "{prompt}"],
+                args=["{prompt}"],
                 interactive=True,
+                allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"],
             ),
         }
 

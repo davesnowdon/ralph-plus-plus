@@ -34,7 +34,13 @@ class CliTool(BaseTool):
             env.update(extra_env)
 
         # Build args list, substituting {prompt} placeholder
-        args = [self.config.command] + [a.replace("{prompt}", prompt) for a in self.config.args]
+        raw_args = [a.replace("{prompt}", prompt) for a in self.config.args]
+
+        # Inject --allowedTools before positional args when configured
+        if self.config.allowed_tools:
+            args = [self.config.command, "--allowedTools"] + self.config.allowed_tools + raw_args
+        else:
+            args = [self.config.command] + raw_args
 
         # Determine stdin
         stdin_data: str | None = None

@@ -18,7 +18,7 @@ branch_prefix: "ralph/"             # [user/project] prefix for created branches
 branch_suffix_length: 4             # [built-in] random hex chars for uniqueness
 
 # ── PRD tool ───────────────────────────────────────────────────────────
-prd_tool: claude                    # [user/project] tool for PRD generation/conversion
+prd_tool: claude-interactive         # [user/project] tool for PRD generation/conversion
 
 # ── Tool definitions ───────────────────────────────────────────────────
 # [user/project] If omitted, claude and codex defaults are auto-created.
@@ -33,6 +33,13 @@ tools:
     command: claude
     args: ["--dangerously-skip-permissions", "--print"]
     stdin: "{prompt}"
+
+  claude-interactive:
+    type: cli
+    command: claude
+    args: ["{prompt}"]
+    interactive: true
+    allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"]
 
   # Custom tool example:
   # my_reviewer:
