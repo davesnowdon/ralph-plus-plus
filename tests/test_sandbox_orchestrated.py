@@ -25,6 +25,7 @@ def _make_config(
     wrapper = sandbox_dir / "bin" / "ralph-sandbox"
     wrapper.write_text("#!/bin/bash\necho fake")
     wrapper.chmod(0o755)
+    (sandbox_dir / "docker-compose.yml").write_text("version: '3'\n")
 
     # Fake session runner
     runner = tmp_path / "scripts" / "ralph-single-step.sh"

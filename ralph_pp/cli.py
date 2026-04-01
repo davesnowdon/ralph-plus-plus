@@ -43,7 +43,12 @@ def _resolve_config(
 ) -> tuple[list[Path], Path | None]:
     """Discover config file paths and resolve repo."""
     if config_file is not None:
-        config_paths = [config_file] if config_file.exists() else []
+        if not config_file.exists():
+            raise click.BadParameter(
+                f"Config file not found: {config_file}",
+                param_hint="'--config'",
+            )
+        config_paths = [config_file]
     else:
         config_paths = discover_config_files(repo_path=repo)
 

@@ -529,6 +529,7 @@ def _make_fake_sandbox(base: Path) -> Path:
     wrapper = sandbox / "bin" / "ralph-sandbox"
     wrapper.write_text("#!/bin/sh\necho fake")
     wrapper.chmod(0o755)
+    (sandbox / "docker-compose.yml").write_text("version: '3'\n")
     return sandbox
 
 
@@ -596,6 +597,29 @@ def test_sandbox_resolution_fails_cleanly(tmp_path, monkeypatch):
         resolve_sandbox_dir(cfg)
 
 
+def test_sandbox_resolution_rejects_standalone_install(tmp_path, monkeypatch):
+    """PATH resolution should skip a standalone install without docker-compose.yml."""
+    # Create a fake standalone binary (no docker-compose.yml)
+    standalone = tmp_path / "usr" / "local" / "bin"
+    standalone.mkdir(parents=True)
+    wrapper = standalone / "ralph-sandbox"
+    wrapper.write_text("#!/bin/sh\necho fake")
+    wrapper.chmod(0o755)
+
+    monkeypatch.delenv("RALPH_SANDBOX_DIR", raising=False)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: str(wrapper) if name == "ralph-sandbox" else None,
+    )
+    cfg = Config(
+        repo_path=tmp_path,
+        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        ralph=RalphConfig(sandbox_dir=""),
+    )
+    with pytest.raises(FileNotFoundError, match="Could not find ralph-sandbox"):
+        resolve_sandbox_dir(cfg)
+
+
 # ── detect_test_commands tests ───────────────────────────────────────
 
 
@@ -639,6 +663,57 @@ def test_detect_test_commands_makefile_priority(tmp_path):
     (tmp_path / "Makefile").write_text("test:\n\tpytest && ruff check .\n")
     (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
     assert detect_test_commands(tmp_path) == ["make test"]
+
+
+def test_detect_test_commands_wired_into_load_config(tmp_path):
+    """load_config should auto-populate test_commands when detection succeeds."""
+    (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
+    data = {
+        "repo_path": str(tmp_path),
+        "orchestrated": {"run_tests_between_steps": True},
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        config_path = Path(f.name)
+
+    cfg = load_config(config_path)
+    assert cfg.orchestrated.test_commands == ["make test"]
+    config_path.unlink()
+
+
+def test_detect_test_commands_not_wired_when_disabled(tmp_path):
+    """load_config should NOT auto-populate when run_tests_between_steps is False."""
+    (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
+    data = {
+        "repo_path": str(tmp_path),
+        "orchestrated": {"run_tests_between_steps": False},
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        config_path = Path(f.name)
+
+    cfg = load_config(config_path)
+    assert cfg.orchestrated.test_commands == []
+    config_path.unlink()
+
+
+def test_detect_test_commands_not_overridden_when_configured(tmp_path):
+    """Explicit test_commands should not be replaced by auto-detection."""
+    (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
+    data = {
+        "repo_path": str(tmp_path),
+        "orchestrated": {
+            "run_tests_between_steps": True,
+            "test_commands": ["custom-test"],
+        },
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        config_path = Path(f.name)
+
+    cfg = load_config(config_path)
+    assert cfg.orchestrated.test_commands == ["custom-test"]
+    config_path.unlink()
 
 
 # ── format_effective_config tests ────────────────────────────────────

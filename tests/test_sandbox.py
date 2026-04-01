@@ -38,6 +38,7 @@ def test_build_sandbox_command_delegated(tmp_path):
     wrapper = sandbox_dir / "bin" / "ralph-sandbox"
     wrapper.write_text("#!/bin/bash\necho fake")
     wrapper.chmod(0o755)
+    (sandbox_dir / "docker-compose.yml").write_text("version: '3'\n")
 
     cfg = _make_config_with_sandbox_dir(str(sandbox_dir))
     worktree = tmp_path / "project"
@@ -66,6 +67,7 @@ def test_build_sandbox_command_with_session_runner(tmp_path):
     wrapper = sandbox_dir / "bin" / "ralph-sandbox"
     wrapper.write_text("#!/bin/bash\necho fake")
     wrapper.chmod(0o755)
+    (sandbox_dir / "docker-compose.yml").write_text("version: '3'\n")
 
     cfg = _make_config_with_sandbox_dir(str(sandbox_dir), mode="orchestrated")
     worktree = tmp_path / "project"
@@ -95,6 +97,7 @@ def test_build_sandbox_command_passes_config_dirs(tmp_path):
     wrapper = sandbox_dir / "bin" / "ralph-sandbox"
     wrapper.write_text("#!/bin/bash\necho fake")
     wrapper.chmod(0o755)
+    (sandbox_dir / "docker-compose.yml").write_text("version: '3'\n")
 
     cfg = _make_config_with_sandbox_dir(str(sandbox_dir))
     worktree = tmp_path / "project"
@@ -130,6 +133,7 @@ def test_delegated_mode_integration(tmp_path):
         '#!/bin/bash\necho "ARGS: $@" > "$(dirname "$0")/../invocation.log"\nexit 0\n'
     )
     wrapper.chmod(0o755)
+    (sandbox_dir / "docker-compose.yml").write_text("version: '3'\n")
 
     cfg = _make_config_with_sandbox_dir(str(sandbox_dir))
     worktree = tmp_path / "project"
@@ -153,6 +157,7 @@ def test_delegated_mode_returns_false_on_failure(tmp_path):
     wrapper = sandbox_dir / "bin" / "ralph-sandbox"
     wrapper.write_text("#!/bin/bash\nexit 1\n")
     wrapper.chmod(0o755)
+    (sandbox_dir / "docker-compose.yml").write_text("version: '3'\n")
 
     cfg = _make_config_with_sandbox_dir(str(sandbox_dir))
     worktree = tmp_path / "project"

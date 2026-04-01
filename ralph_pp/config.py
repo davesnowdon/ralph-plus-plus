@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -201,11 +204,24 @@ def discover_config_files(repo_path: Path | None = None) -> list[Path]:
     return paths
 
 
+def _is_sandbox_root(path: Path) -> bool:
+    """Check whether *path* looks like a ralph-sandbox checkout.
+
+    Requires both ``bin/ralph-sandbox`` (the wrapper script) and
+    ``docker-compose.yml`` (the container definition) to exist.  This
+    prevents false positives when ``ralph-sandbox`` is a standalone
+    executable installed in e.g. ``/usr/local/bin``.
+    """
+    return (path / "bin" / "ralph-sandbox").is_file() and (path / "docker-compose.yml").is_file()
+
+
 def _check_sandbox(path: Path) -> None:
-    """Verify that a sandbox directory contains ``bin/ralph-sandbox``."""
-    wrapper = path / "bin" / "ralph-sandbox"
-    if not wrapper.is_file():
-        raise FileNotFoundError(f"ralph-sandbox wrapper not found at {wrapper}")
+    """Verify that *path* is a valid ralph-sandbox checkout root."""
+    if not _is_sandbox_root(path):
+        raise FileNotFoundError(
+            f"ralph-sandbox checkout not found at {path}. "
+            f"Expected bin/ralph-sandbox and docker-compose.yml to exist."
+        )
 
 
 def resolve_sandbox_dir(config: Config) -> Path:
@@ -230,17 +246,17 @@ def resolve_sandbox_dir(config: Config) -> Path:
         _check_sandbox(resolved)
         return resolved
 
-    # 3. PATH lookup
+    # 3. PATH lookup — only if the found executable lives inside a real checkout
     which_result = shutil.which("ralph-sandbox")
     if which_result:
-        # ralph-sandbox lives at <sandbox_dir>/bin/ralph-sandbox
-        resolved = Path(which_result).resolve().parent.parent
-        if (resolved / "bin" / "ralph-sandbox").is_file():
-            return resolved
+        # In a checkout layout the wrapper is at <sandbox_root>/bin/ralph-sandbox
+        candidate = Path(which_result).resolve().parent.parent
+        if _is_sandbox_root(candidate):
+            return candidate
 
     # 4. Sibling checkout (dev superproject layout)
     sibling = (config.repo_path / ".." / "ralph-sandbox").resolve()
-    if (sibling / "bin" / "ralph-sandbox").is_file():
+    if _is_sandbox_root(sibling):
         return sibling
 
     raise FileNotFoundError(
@@ -357,6 +373,19 @@ def load_config(
         )
 
     cfg.hooks = data.get("hooks", {})
+
+    # Auto-detect test commands when enabled but not configured
+    if cfg.orchestrated.run_tests_between_steps and not cfg.orchestrated.test_commands:
+        detected = detect_test_commands(cfg.repo_path)
+        if detected:
+            cfg.orchestrated.test_commands = detected
+            logger.info("Auto-detected test commands: %s", detected)
+        else:
+            logger.warning(
+                "run_tests_between_steps is enabled but no test commands "
+                "configured or detected for %s",
+                cfg.repo_path,
+            )
 
     validate_config(cfg)
     return cfg

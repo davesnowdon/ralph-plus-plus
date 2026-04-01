@@ -63,7 +63,7 @@ ralph++ config --repo /path/to/repo     # include project config
 If `ralph.sandbox_dir` is not set, ralph++ resolves the sandbox automatically:
 
 1. `RALPH_SANDBOX_DIR` environment variable
-2. `ralph-sandbox` on `PATH`
+2. `ralph-sandbox` on `PATH` (must be inside a checkout with `docker-compose.yml`)
 3. Sibling checkout (`../ralph-sandbox` relative to `--repo`)
 
 ### Test command auto-detection
