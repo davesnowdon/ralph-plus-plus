@@ -22,8 +22,10 @@ def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
     tool = make_tool(config.prd_tool, config)
     prompt = (
         f"Create a PRD for the following feature: {feature}\n\n"
-        "Use the /prd skill to generate a detailed Product Requirements Document. "
-        "Save the output to tasks/prd.md"
+        "You have the /prd skill available. Use it to generate a detailed Product "
+        "Requirements Document with goals, user stories, acceptance criteria, "
+        "non-goals, and technical considerations.\n\n"
+        "Save the PRD to tasks/prd.md"
     )
     result = tool.run(prompt=prompt, cwd=worktree_path)
     if not result.success:
@@ -86,7 +88,10 @@ def convert_prd_to_json(prd_file: Path, worktree_path: Path, config: Config) -> 
     console.print("[bold cyan]\n── Step: Convert PRD to prd.json ──[/bold cyan]")
     tool = make_tool(config.prd_tool, config)
     prompt = (
-        f"Convert the PRD at {prd_file} to prd.json format using the /ralph skill. "
+        f"Convert the PRD at {prd_file} to structured JSON format.\n\n"
+        "You have the /ralph skill available. Use it to convert the PRD into an "
+        "executable prd.json with properly sized user stories, dependency ordering, "
+        "and verifiable acceptance criteria.\n\n"
         "Save the output to scripts/ralph/prd.json"
     )
     result = tool.run(prompt=prompt, cwd=worktree_path)

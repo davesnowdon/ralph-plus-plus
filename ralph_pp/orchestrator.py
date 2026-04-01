@@ -10,6 +10,7 @@ from rich.rule import Rule
 
 from .config import Config
 from .hooks import run_hooks
+from .skills import ensure_prd_skills
 from .steps.post_review import post_review_loop
 from .steps.prd import convert_prd_to_json, generate_prd, review_prd_loop
 from .steps.sandbox import run_sandbox
@@ -68,6 +69,7 @@ class Orchestrator:
     def _step_prd(self, skip_review: bool) -> None:
         assert self.worktree_path is not None
         console.print(Rule("[bold]2 · PRD[/bold]"))
+        ensure_prd_skills(self.config, self.worktree_path)
         run_hooks("pre_prd_generate", self.config.hooks, self.worktree_path)
         prd_file = generate_prd(self.feature, self.worktree_path, self.config)
         run_hooks("post_prd_generate", self.config.hooks, self.worktree_path)
