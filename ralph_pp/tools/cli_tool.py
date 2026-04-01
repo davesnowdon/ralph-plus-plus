@@ -44,6 +44,19 @@ class CliTool(BaseTool):
         preview = " ".join(args[:2]) + (" ..." if len(args) > 2 else "")
         console.print("[bold green]→ " + self.name + ":[/bold green] " + preview)
 
+        if self.config.interactive:
+            # Interactive mode: let stdin/stdout flow to the terminal
+            result = subprocess.run(
+                args,
+                cwd=cwd,
+                env=env,
+            )
+            return ToolResult(
+                output="",
+                exit_code=result.returncode,
+                success=result.returncode == 0,
+            )
+
         result = subprocess.run(
             args,
             cwd=cwd,

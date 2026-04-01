@@ -35,6 +35,9 @@ def test_load_empty_config():
     assert cfg.ralph.sandbox_tool == "claude"
     assert "codex" in cfg.tools
     assert "claude" in cfg.tools
+    assert "claude-interactive" in cfg.tools
+    assert cfg.tools["claude-interactive"].interactive is True
+    assert cfg.tools["claude"].interactive is False
 
 
 def test_load_config_from_file():
@@ -185,7 +188,7 @@ def test_validate_config_bad_mode():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         ralph=RalphConfig(mode="invalid"),
     )
     with pytest.raises(ValueError, match="ralph.mode"):
@@ -196,7 +199,7 @@ def test_validate_config_bad_sandbox_tool():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig()},
+        tools={"claude": ToolConfig(), "claude-interactive": ToolConfig()},
         ralph=RalphConfig(sandbox_tool="nonexistent"),
     )
     with pytest.raises(ValueError, match="ralph.sandbox_tool"):
@@ -207,7 +210,7 @@ def test_validate_config_bad_orchestrated_coder():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         orchestrated=OrchestratedConfig(coder="nonexistent"),
     )
     with pytest.raises(ValueError, match="orchestrated.coder"):
@@ -242,7 +245,7 @@ def test_validate_config_empty_test_command():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         orchestrated=OrchestratedConfig(
             run_tests_between_steps=True,
             test_commands=["pytest", ""],
@@ -255,7 +258,7 @@ def test_validate_config_empty_test_command():
 def test_validate_config_test_commands_not_checked_when_disabled():
     """Empty test_commands entries are fine when run_tests_between_steps is False."""
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         orchestrated=OrchestratedConfig(
             run_tests_between_steps=False,
             test_commands=[""],
@@ -330,9 +333,9 @@ def test_load_post_review_from_file():
 
 
 def test_prd_tool_default():
-    """Default prd_tool should be 'claude'."""
+    """Default prd_tool should be 'claude-interactive'."""
     cfg = load_config(None)
-    assert cfg.prd_tool == "claude"
+    assert cfg.prd_tool == "claude-interactive"
 
 
 def test_prd_tool_from_file():
@@ -351,11 +354,39 @@ def test_validate_config_bad_prd_tool():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         prd_tool="nonexistent",
     )
     with pytest.raises(ValueError, match="prd_tool"):
         validate_config(cfg)
+
+
+def test_interactive_field_from_yaml():
+    """interactive field in tools YAML should be parsed correctly."""
+    data = {
+        "tools": {
+            "claude": {"command": "claude", "args": ["--print"]},
+            "claude-interactive": {
+                "command": "claude",
+                "args": ["-p", "{prompt}"],
+                "interactive": True,
+            },
+            "codex": {"command": "codex", "args": ["{prompt}"]},
+            "batch-tool": {
+                "command": "batch-cli",
+                "args": ["{prompt}"],
+            },
+        },
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp_path = Path(f.name)
+
+    cfg = load_config(tmp_path)
+    assert cfg.tools["claude-interactive"].interactive is True
+    assert cfg.tools["batch-tool"].interactive is False
+    assert cfg.tools["claude"].interactive is False
+    tmp_path.unlink()
 
 
 # ── deep merge tests ─────────────────────────────────────────────────
@@ -529,7 +560,7 @@ def test_format_effective_config():
     assert isinstance(output, str)
     parsed = yaml.safe_load(output)
     assert parsed["branch_prefix"] == "ralph/"
-    assert parsed["prd_tool"] == "claude"
+    assert parsed["prd_tool"] == "claude-interactive"
     assert "claude" in parsed["tools"]
 
 

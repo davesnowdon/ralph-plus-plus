@@ -14,7 +14,9 @@ def _make_config():
 
     return Config(
         tools={
-            "claude": ToolConfig(command="claude", args=["--print"], stdin="{prompt}"),
+            "claude-interactive": ToolConfig(
+                command="claude", args=["-p", "{prompt}"], interactive=True
+            ),
         }
     )
 
