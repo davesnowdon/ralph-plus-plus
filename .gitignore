@@ -16,3 +16,5 @@ venv/
 # Agent Zero project internals (secrets, memory indexes)
 .a0proj/
 
+.claude
+.codex
