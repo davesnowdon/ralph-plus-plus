@@ -37,7 +37,7 @@ tools:
   claude-interactive:
     type: cli
     command: claude
-    args: ["{prompt}"]
+    args: ["-p", "{prompt}"]
     interactive: true
     allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"]
 

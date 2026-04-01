@@ -38,7 +38,8 @@ class CliTool(BaseTool):
 
         # Inject --allowedTools before positional args when configured
         if self.config.allowed_tools:
-            args = [self.config.command, "--allowedTools"] + self.config.allowed_tools + raw_args
+            tools_csv = ",".join(self.config.allowed_tools)
+            args = [self.config.command, "--allowedTools", tools_csv] + raw_args
         else:
             args = [self.config.command] + raw_args
 

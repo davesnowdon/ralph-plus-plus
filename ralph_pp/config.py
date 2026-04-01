@@ -464,7 +464,7 @@ def _build_config(data: dict[str, Any]) -> Config:
             "claude-interactive": ToolConfig(
                 type="cli",
                 command="claude",
-                args=["{prompt}"],
+                args=["-p", "{prompt}"],
                 interactive=True,
                 allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"],
             ),

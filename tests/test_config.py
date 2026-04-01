@@ -45,7 +45,7 @@ def test_load_empty_config():
         "Grep",
         "Bash(git:*)",
     ]
-    assert "-p" not in cfg.tools["claude-interactive"].args
+    assert "-p" in cfg.tools["claude-interactive"].args
     assert cfg.tools["claude"].interactive is False
 
 
