@@ -13,7 +13,8 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ..config import Config, OrchestratedConfig, resolve_sandbox_dir
+from ..config import Config, OrchestratedConfig
+from ..sandbox import resolve_sandbox_dir
 from ..tools import make_tool
 
 console = Console()

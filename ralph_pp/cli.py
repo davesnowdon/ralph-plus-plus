@@ -8,7 +8,12 @@ from typing import Any
 import click
 from rich.console import Console
 
-from .config import discover_config_files, format_effective_config, load_config
+from .config import (
+    discover_config_files,
+    format_effective_config,
+    load_config,
+    load_config_with_provenance,
+)
 from .orchestrator import Orchestrator
 
 console = Console()
@@ -199,16 +204,27 @@ def run(
 @_repo_option
 @_config_option
 @_sandbox_dir_option
+@click.option(
+    "--show-sources",
+    is_flag=True,
+    default=False,
+    help="Show which config layer set each value.",
+)
 def show_config(
     repo: Path | None,
     config_file: Path | None,
     sandbox_dir: Path | None,
+    show_sources: bool,
 ) -> None:
     """Print the effective merged config."""
     config_paths, repo = _resolve_config(config_file, repo)
     overrides = _build_overrides(repo, None, None, sandbox_dir)
-    cfg = load_config(config_paths, overrides)
-    click.echo(format_effective_config(cfg))
+    if show_sources:
+        cfg, provenance = load_config_with_provenance(config_paths, overrides)
+        click.echo(provenance.format(cfg))
+    else:
+        cfg = load_config(config_paths, overrides)
+        click.echo(format_effective_config(cfg))
 
 
 if __name__ == "__main__":

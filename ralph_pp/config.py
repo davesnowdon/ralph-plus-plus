@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import os
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
+
+from .detection import detect_test_commands
 
 logger = logging.getLogger(__name__)
 
@@ -204,70 +204,6 @@ def discover_config_files(repo_path: Path | None = None) -> list[Path]:
     return paths
 
 
-def _is_sandbox_root(path: Path) -> bool:
-    """Check whether *path* looks like a ralph-sandbox checkout.
-
-    Requires both ``bin/ralph-sandbox`` (the wrapper script) and
-    ``docker-compose.yml`` (the container definition) to exist.  This
-    prevents false positives when ``ralph-sandbox`` is a standalone
-    executable installed in e.g. ``/usr/local/bin``.
-    """
-    return (path / "bin" / "ralph-sandbox").is_file() and (path / "docker-compose.yml").is_file()
-
-
-def _check_sandbox(path: Path) -> None:
-    """Verify that *path* is a valid ralph-sandbox checkout root."""
-    if not _is_sandbox_root(path):
-        raise FileNotFoundError(
-            f"ralph-sandbox checkout not found at {path}. "
-            f"Expected bin/ralph-sandbox and docker-compose.yml to exist."
-        )
-
-
-def resolve_sandbox_dir(config: Config) -> Path:
-    """Resolve the ralph-sandbox checkout directory.
-
-    Resolution order:
-    1. ``config.ralph.sandbox_dir`` (explicit config / CLI)
-    2. ``RALPH_SANDBOX_DIR`` environment variable
-    3. ``ralph-sandbox`` on ``PATH`` (via ``shutil.which``)
-    4. Sibling checkout relative to ``config.repo_path``
-    """
-    # 1. Explicit config value
-    if config.ralph.sandbox_dir:
-        resolved = Path(config.ralph.sandbox_dir).expanduser().resolve()
-        _check_sandbox(resolved)
-        return resolved
-
-    # 2. Environment variable
-    env_dir = os.environ.get("RALPH_SANDBOX_DIR")
-    if env_dir:
-        resolved = Path(env_dir).expanduser().resolve()
-        _check_sandbox(resolved)
-        return resolved
-
-    # 3. PATH lookup — only if the found executable lives inside a real checkout
-    which_result = shutil.which("ralph-sandbox")
-    if which_result:
-        # In a checkout layout the wrapper is at <sandbox_root>/bin/ralph-sandbox
-        candidate = Path(which_result).resolve().parent.parent
-        if _is_sandbox_root(candidate):
-            return candidate
-
-    # 4. Sibling checkout (dev superproject layout)
-    sibling = (config.repo_path / ".." / "ralph-sandbox").resolve()
-    if _is_sandbox_root(sibling):
-        return sibling
-
-    raise FileNotFoundError(
-        "Could not find ralph-sandbox. Set one of:\n"
-        "  - ralph.sandbox_dir in config\n"
-        "  - RALPH_SANDBOX_DIR environment variable\n"
-        "  - Add ralph-sandbox/bin to PATH\n"
-        "  - Place ralph-sandbox as a sibling of the repo"
-    )
-
-
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge *override* into *base*. Lists and scalars are replaced."""
     result = base.copy()
@@ -280,14 +216,79 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
-def load_config(
+@dataclass
+class ConfigProvenance:
+    """Tracks which config layer set each key (dot-separated paths)."""
+
+    sources: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+
+    def record_layer(self, data: dict[str, Any], label: str, prefix: str = "") -> None:
+        """Record that *label* set every leaf key in *data*."""
+        for key, value in data.items():
+            full_key = f"{prefix}{key}" if not prefix else f"{prefix}.{key}"
+            if isinstance(value, dict):
+                self.record_layer(cast(dict[str, Any], value), label, full_key)
+            else:
+                self.sources[full_key] = label
+
+    def format(self, config: Config) -> str:
+        """Format provenance as a human-readable table."""
+        import dataclasses
+
+        lines: list[str] = []
+
+        def _walk(obj: Any, prefix: str = "") -> None:
+            if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+                for f in dataclasses.fields(obj):
+                    key = f"{prefix}.{f.name}" if prefix else f.name
+                    _walk(getattr(obj, f.name), key)
+            elif isinstance(obj, dict):
+                for k, v in cast(dict[str, Any], obj).items():
+                    _walk(v, f"{prefix}.{k}" if prefix else str(k))
+            else:
+                source = self.sources.get(prefix, "default")
+                lines.append(f"{prefix}: {obj!r}  ({source})")
+
+        _walk(config)
+        return "\n".join(lines)
+
+
+def load_config_with_provenance(
     paths: list[Path] | Path | None = None,
     overrides: dict[str, Any] | None = None,
-) -> Config:
-    """Load config from one or more YAML files with optional CLI overrides.
+) -> tuple[Config, ConfigProvenance]:
+    """Like load_config but also returns provenance info."""
+    provenance = ConfigProvenance()
 
-    Files are merged in order (later wins). *overrides* are applied last.
-    """
+    if paths is None:
+        path_list: list[Path] = []
+    elif isinstance(paths, Path):
+        path_list = [paths]
+    else:
+        path_list = list(paths)
+
+    data: dict[str, Any] = {}
+    for p in path_list:
+        if p and p.exists():
+            with open(p) as f:
+                layer: dict[str, Any] = yaml.safe_load(f) or {}
+            provenance.record_layer(layer, p.name)
+            data = _deep_merge(data, layer)
+
+    if overrides:
+        cleaned = {k: v for k, v in overrides.items() if v is not None}
+        provenance.record_layer(cleaned, "cli")
+        data = _deep_merge(data, cleaned)
+
+    cfg = _build_config(data)
+    return cfg, provenance
+
+
+def _merge_layers(
+    paths: list[Path] | Path | None,
+    overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[Path]]:
+    """Merge YAML files and overrides into a single data dict."""
     if paths is None:
         path_list: list[Path] = []
     elif isinstance(paths, Path):
@@ -306,6 +307,11 @@ def load_config(
         cleaned = {k: v for k, v in overrides.items() if v is not None}
         data = _deep_merge(data, cleaned)
 
+    return data, path_list
+
+
+def _build_config(data: dict[str, Any]) -> Config:
+    """Construct a Config from a merged data dict."""
     cfg = Config()
 
     if "repo_path" in data:
@@ -391,6 +397,18 @@ def load_config(
     return cfg
 
 
+def load_config(
+    paths: list[Path] | Path | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> Config:
+    """Load config from one or more YAML files with optional CLI overrides.
+
+    Files are merged in order (later wins). *overrides* are applied last.
+    """
+    data, _ = _merge_layers(paths, overrides)
+    return _build_config(data)
+
+
 def validate_config(cfg: Config) -> None:
     """Validate config values that would otherwise cause confusing runtime errors."""
     errors: list[str] = []
@@ -437,50 +455,6 @@ def validate_config(cfg: Config) -> None:
 
     if errors:
         raise ValueError("Config validation failed:\n  " + "\n  ".join(errors))
-
-
-def detect_test_commands(repo_path: Path) -> list[str]:
-    """Auto-detect test commands for common project types.
-
-    Returns an empty list when detection is ambiguous or nothing is found.
-    """
-    commands: list[str] = []
-
-    # Makefile with a 'test' target takes priority
-    makefile = repo_path / "Makefile"
-    if makefile.is_file():
-        try:
-            text = makefile.read_text()
-            if "\ntest:" in text or "\ntest :" in text or text.startswith("test:"):
-                commands.append("make test")
-        except OSError:
-            pass
-
-    if not commands:
-        # Python
-        if (repo_path / "pytest.ini").is_file() or (repo_path / "setup.cfg").is_file():
-            commands.append("pytest")
-        elif (repo_path / "pyproject.toml").is_file():
-            try:
-                text = (repo_path / "pyproject.toml").read_text()
-                if "[tool.pytest" in text:
-                    commands.append("pytest")
-            except OSError:
-                pass
-
-        # Node
-        if (repo_path / "package.json").is_file():
-            commands.append("npm test")
-
-        # Rust
-        if (repo_path / "Cargo.toml").is_file():
-            commands.append("cargo test")
-
-        # Go
-        if (repo_path / "go.mod").is_file():
-            commands.append("go test ./...")
-
-    return commands
 
 
 def format_effective_config(config: Config) -> str:

@@ -8,6 +8,7 @@ import yaml
 
 from ralph_pp.config import (
     Config,
+    ConfigProvenance,
     OrchestratedConfig,
     PostReviewConfig,
     PrdReviewConfig,
@@ -15,11 +16,10 @@ from ralph_pp.config import (
     ToolConfig,
     _deep_merge,
     _parse_bool,
-    detect_test_commands,
     discover_config_files,
     format_effective_config,
     load_config,
-    resolve_sandbox_dir,
+    load_config_with_provenance,
     validate_config,
 )
 
@@ -519,203 +519,6 @@ def test_discover_config_files_order(tmp_path, monkeypatch):
     assert "myrepo" in str(paths[1])
 
 
-# ── resolve_sandbox_dir tests ────────────────────────────────────────
-
-
-def _make_fake_sandbox(base: Path) -> Path:
-    """Create a minimal fake ralph-sandbox directory structure."""
-    sandbox = base / "ralph-sandbox"
-    (sandbox / "bin").mkdir(parents=True)
-    wrapper = sandbox / "bin" / "ralph-sandbox"
-    wrapper.write_text("#!/bin/sh\necho fake")
-    wrapper.chmod(0o755)
-    (sandbox / "docker-compose.yml").write_text("version: '3'\n")
-    return sandbox
-
-
-def test_sandbox_resolution_from_config(tmp_path):
-    """Explicit sandbox_dir in config should be used."""
-    sandbox = _make_fake_sandbox(tmp_path)
-    cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
-        ralph=RalphConfig(sandbox_dir=str(sandbox)),
-    )
-    assert resolve_sandbox_dir(cfg) == sandbox
-
-
-def test_sandbox_resolution_env_var(tmp_path, monkeypatch):
-    """RALPH_SANDBOX_DIR env var should be used when config is empty."""
-    sandbox = _make_fake_sandbox(tmp_path)
-    monkeypatch.setenv("RALPH_SANDBOX_DIR", str(sandbox))
-    cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
-        ralph=RalphConfig(sandbox_dir=""),
-    )
-    assert resolve_sandbox_dir(cfg) == sandbox
-
-
-def test_sandbox_resolution_which(tmp_path, monkeypatch):
-    """PATH lookup via shutil.which should resolve sandbox."""
-    sandbox = _make_fake_sandbox(tmp_path)
-    wrapper = sandbox / "bin" / "ralph-sandbox"
-    monkeypatch.delenv("RALPH_SANDBOX_DIR", raising=False)
-    monkeypatch.setattr(
-        "shutil.which", lambda name: str(wrapper) if name == "ralph-sandbox" else None
-    )
-    cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
-        ralph=RalphConfig(sandbox_dir=""),
-    )
-    assert resolve_sandbox_dir(cfg) == sandbox
-
-
-def test_sandbox_resolution_sibling(tmp_path, monkeypatch):
-    """Sibling checkout should be discovered."""
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-    sandbox = _make_fake_sandbox(tmp_path)
-    monkeypatch.delenv("RALPH_SANDBOX_DIR", raising=False)
-    monkeypatch.setattr("shutil.which", lambda name: None)
-    cfg = Config(
-        repo_path=repo,
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
-        ralph=RalphConfig(sandbox_dir=""),
-    )
-    assert resolve_sandbox_dir(cfg) == sandbox.resolve()
-
-
-def test_sandbox_resolution_fails_cleanly(tmp_path, monkeypatch):
-    """Should raise FileNotFoundError with clear guidance."""
-    monkeypatch.delenv("RALPH_SANDBOX_DIR", raising=False)
-    monkeypatch.setattr("shutil.which", lambda name: None)
-    cfg = Config(
-        repo_path=tmp_path,
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
-        ralph=RalphConfig(sandbox_dir=""),
-    )
-    with pytest.raises(FileNotFoundError, match="Could not find ralph-sandbox"):
-        resolve_sandbox_dir(cfg)
-
-
-def test_sandbox_resolution_rejects_standalone_install(tmp_path, monkeypatch):
-    """PATH resolution should skip a standalone install without docker-compose.yml."""
-    # Create a fake standalone binary (no docker-compose.yml)
-    standalone = tmp_path / "usr" / "local" / "bin"
-    standalone.mkdir(parents=True)
-    wrapper = standalone / "ralph-sandbox"
-    wrapper.write_text("#!/bin/sh\necho fake")
-    wrapper.chmod(0o755)
-
-    monkeypatch.delenv("RALPH_SANDBOX_DIR", raising=False)
-    monkeypatch.setattr(
-        "shutil.which",
-        lambda name: str(wrapper) if name == "ralph-sandbox" else None,
-    )
-    cfg = Config(
-        repo_path=tmp_path,
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
-        ralph=RalphConfig(sandbox_dir=""),
-    )
-    with pytest.raises(FileNotFoundError, match="Could not find ralph-sandbox"):
-        resolve_sandbox_dir(cfg)
-
-
-# ── detect_test_commands tests ───────────────────────────────────────
-
-
-def test_detect_test_commands_makefile(tmp_path):
-    """Makefile with 'test:' target should be detected."""
-    (tmp_path / "Makefile").write_text("all:\n\techo hi\n\ntest:\n\tpytest\n")
-    assert detect_test_commands(tmp_path) == ["make test"]
-
-
-def test_detect_test_commands_pytest(tmp_path):
-    """pyproject.toml with [tool.pytest] should detect pytest."""
-    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
-    assert detect_test_commands(tmp_path) == ["pytest"]
-
-
-def test_detect_test_commands_node(tmp_path):
-    """package.json should detect npm test."""
-    (tmp_path / "package.json").write_text('{"name": "test"}')
-    assert detect_test_commands(tmp_path) == ["npm test"]
-
-
-def test_detect_test_commands_rust(tmp_path):
-    """Cargo.toml should detect cargo test."""
-    (tmp_path / "Cargo.toml").write_text("[package]\n")
-    assert detect_test_commands(tmp_path) == ["cargo test"]
-
-
-def test_detect_test_commands_go(tmp_path):
-    """go.mod should detect go test."""
-    (tmp_path / "go.mod").write_text("module example.com/foo\n")
-    assert detect_test_commands(tmp_path) == ["go test ./..."]
-
-
-def test_detect_test_commands_none(tmp_path):
-    """Empty directory should return no commands."""
-    assert detect_test_commands(tmp_path) == []
-
-
-def test_detect_test_commands_makefile_priority(tmp_path):
-    """Makefile test target should take priority over language-specific detection."""
-    (tmp_path / "Makefile").write_text("test:\n\tpytest && ruff check .\n")
-    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
-    assert detect_test_commands(tmp_path) == ["make test"]
-
-
-def test_detect_test_commands_wired_into_load_config(tmp_path):
-    """load_config should auto-populate test_commands when detection succeeds."""
-    (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
-    data = {
-        "repo_path": str(tmp_path),
-        "orchestrated": {"run_tests_between_steps": True},
-    }
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        yaml.dump(data, f)
-        config_path = Path(f.name)
-
-    cfg = load_config(config_path)
-    assert cfg.orchestrated.test_commands == ["make test"]
-    config_path.unlink()
-
-
-def test_detect_test_commands_not_wired_when_disabled(tmp_path):
-    """load_config should NOT auto-populate when run_tests_between_steps is False."""
-    (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
-    data = {
-        "repo_path": str(tmp_path),
-        "orchestrated": {"run_tests_between_steps": False},
-    }
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        yaml.dump(data, f)
-        config_path = Path(f.name)
-
-    cfg = load_config(config_path)
-    assert cfg.orchestrated.test_commands == []
-    config_path.unlink()
-
-
-def test_detect_test_commands_not_overridden_when_configured(tmp_path):
-    """Explicit test_commands should not be replaced by auto-detection."""
-    (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
-    data = {
-        "repo_path": str(tmp_path),
-        "orchestrated": {
-            "run_tests_between_steps": True,
-            "test_commands": ["custom-test"],
-        },
-    }
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        yaml.dump(data, f)
-        config_path = Path(f.name)
-
-    cfg = load_config(config_path)
-    assert cfg.orchestrated.test_commands == ["custom-test"]
-    config_path.unlink()
-
-
 # ── format_effective_config tests ────────────────────────────────────
 
 
@@ -728,3 +531,56 @@ def test_format_effective_config():
     assert parsed["branch_prefix"] == "ralph/"
     assert parsed["prd_tool"] == "claude"
     assert "claude" in parsed["tools"]
+
+
+# ── provenance tests ────────────────────────────────────────────────
+
+
+def test_provenance_tracks_file_layers(tmp_path):
+    """Provenance should record which file set each key."""
+    user_data = {"branch_prefix": "user/", "ralph": {"mode": "delegated"}}
+    project_data = {"ralph": {"mode": "orchestrated"}}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, dir=tmp_path) as f1:
+        yaml.dump(user_data, f1)
+        user_path = Path(f1.name)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, dir=tmp_path) as f2:
+        yaml.dump(project_data, f2)
+        project_path = Path(f2.name)
+
+    cfg, prov = load_config_with_provenance([user_path, project_path])
+    assert prov.sources["branch_prefix"] == user_path.name
+    assert prov.sources["ralph.mode"] == project_path.name
+    assert cfg.ralph.mode == "orchestrated"
+    assert cfg.branch_prefix == "user/"
+    user_path.unlink()
+    project_path.unlink()
+
+
+def test_provenance_cli_overrides(tmp_path):
+    """CLI overrides should show 'cli' as the source."""
+    data = {"branch_prefix": "file/"}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp = Path(f.name)
+
+    cfg, prov = load_config_with_provenance(tmp, overrides={"branch_prefix": "cli/"})
+    assert prov.sources["branch_prefix"] == "cli"
+    assert cfg.branch_prefix == "cli/"
+    tmp.unlink()
+
+
+def test_provenance_defaults_not_in_sources():
+    """Keys that were never set by any layer should show as 'default'."""
+    cfg, prov = load_config_with_provenance(None)
+    assert "branch_prefix" not in prov.sources
+    output = prov.format(cfg)
+    assert "branch_prefix: 'ralph/'  (default)" in output
+
+
+def test_provenance_format_output():
+    """Format output should include key, value, and source."""
+    prov = ConfigProvenance(sources={"branch_prefix": "myfile.yaml"})
+    cfg = load_config(None)
+    cfg.branch_prefix = "test/"
+    output = prov.format(cfg)
+    assert "branch_prefix: 'test/'  (myfile.yaml)" in output
