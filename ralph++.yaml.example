@@ -1,16 +1,27 @@
-# ralph++ configuration example
-# Copy to ralph++.yaml and edit for your setup
+# ralph++ full configuration reference
+#
+# Config precedence (later wins):
+#   1. Built-in defaults
+#   2. User config:    ~/.config/ralph-plus-plus/config.yaml or ~/.ralph++.yaml
+#   3. Project config: <repo>/.ralph/ralph++.yaml or <repo>/ralph++.yaml
+#   4. CLI flags
+#
+# See examples/ for minimal user-level and project-level examples.
 
 # ── Paths ──────────────────────────────────────────────────────────────
-# repo_path: /path/to/repo        # override with --repo flag
-claude_config_dir: ~/.claude
-codex_config_dir: ~/.codex
+# repo_path: /path/to/repo         # [CLI: --repo] override with --repo flag
+claude_config_dir: ~/.claude        # [user] personal tool config location
+codex_config_dir: ~/.codex          # [user] personal tool config location
 
 # ── Branch naming ──────────────────────────────────────────────────────
-branch_prefix: "ralph/"
-branch_suffix_length: 4           # random hex chars for uniqueness
+branch_prefix: "ralph/"             # [user/project] prefix for created branches
+branch_suffix_length: 4             # [built-in] random hex chars for uniqueness
+
+# ── PRD tool ───────────────────────────────────────────────────────────
+prd_tool: claude                    # [user/project] tool for PRD generation/conversion
 
 # ── Tool definitions ───────────────────────────────────────────────────
+# [user/project] If omitted, claude and codex defaults are auto-created.
 tools:
   codex:
     type: cli
@@ -30,6 +41,7 @@ tools:
   #   args: ["{prompt}"]
 
 # ── PRD review loop ────────────────────────────────────────────────────
+# [user/project] Sensible defaults are built in; override here if needed.
 prd_review:
   reviewer: codex
   reviewer_prompt: >
@@ -46,6 +58,7 @@ prd_review:
   max_cycles: 3
 
 # ── Post-run review loop ───────────────────────────────────────────────
+# [user/project] Sensible defaults are built in; override here if needed.
 post_review:
   reviewer: codex
   reviewer_prompt: >
@@ -62,27 +75,25 @@ post_review:
 
 # ── Ralph sandbox ──────────────────────────────────────────────────────
 ralph:
-  mode: delegated                  # delegated | orchestrated (override with --mode)
-  max_iterations: 20
-  sandbox_dir: ../ralph-sandbox    # path to ralph-sandbox checkout
-  sandbox_tool: claude             # tool for sandbox (delegated mode): claude | codex
-  session_runner: scripts/ralph-single-step.sh  # session runner for orchestrated mode
+  mode: delegated                   # [user/project/CLI: --mode] delegated | orchestrated
+  max_iterations: 20                # [user/project/CLI: --max-iters]
+  sandbox_dir: ../ralph-sandbox     # [user/project/CLI: --sandbox-dir] auto-resolved if omitted
+  sandbox_tool: claude              # [user/project] tool for sandbox (delegated mode)
+  session_runner: scripts/ralph-single-step.sh  # [user/project] orchestrated mode runner
 
 # ── Orchestrated mode settings ─────────────────────────────────────────
-# Only used when ralph.mode is "orchestrated"
+# [user/project] Only used when ralph.mode is "orchestrated"
 orchestrated:
-  coder: claude                    # tool for coding iterations (must match a key in tools section)
-  reviewer: codex                  # tool for reviewing each iteration's output
-  fixer: claude                    # tool for fixing review failures (used when backout_on_failure: false)
+  coder: claude
+  reviewer: codex
+  fixer: claude
   max_iteration_retries: 2
-  run_tests_between_steps: false
-  test_commands:
+  run_tests_between_steps: false    # [project] set true + test_commands for your repo
+  test_commands:                    # [project] auto-detected if empty and enabled
     - "pytest"
     - "ruff check ."
-  backout_on_failure: true         # true: git reset + retry iteration; false: invoke fixer to fix in-place
+  backout_on_failure: true
 
-  # Review prompt — sent to the reviewer after each iteration.
-  # Placeholders: {diff} (git diff of iteration), {prd_file} (path to prd.json)
   review_prompt: >
     Review the following git diff against the requirements in {prd_file}.
     Identify any flaws, omissions, regressions, or test failures.
@@ -91,21 +102,18 @@ orchestrated:
     GIT DIFF:
     {diff}
 
-  # Fix prompt — sent to the fixer when review fails and backout_on_failure is false.
-  # Placeholders: {findings} (reviewer output), {prd_file} (path to prd.json)
   fix_prompt: >
     The following issues were found in the latest code changes against {prd_file}.
     Please fix them and ensure all tests pass:
 
     {findings}
 
-  # Optional: custom per-iteration prompt for the coder. If unset, uses upstream CLAUDE.md.
-  # Placeholders: {iteration}, {prd_file}, {progress}, {review_findings}
   # prompt_template: |
   #   You are implementing iteration {iteration}. The PRD is at {prd_file}.
   #   Previous review findings: {review_findings}
 
 # ── Lifecycle hooks ────────────────────────────────────────────────────
+# [user/project] Commands run at specific workflow stages.
 hooks:
   post_worktree_create:
     - "codegraph init"

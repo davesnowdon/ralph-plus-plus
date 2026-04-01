@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ..config import Config, ReviewConfig
+from ..config import Config, PrdReviewConfig
 from ..tools import make_tool
 
 console = Console()
@@ -19,7 +19,7 @@ def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
     Returns the path to the generated PRD markdown file.
     """
     console.print("[bold cyan]\n── Step: Generate PRD ──[/bold cyan]")
-    tool = make_tool("claude", config)
+    tool = make_tool(config.prd_tool, config)
     prompt = (
         f"Create a PRD for the following feature: {feature}\n\n"
         "Use the /prd skill to generate a detailed Product Requirements Document. "
@@ -40,7 +40,7 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
     """
     Iteratively review and fix the text PRD until LGTM or max_cycles reached.
     """
-    review_cfg: ReviewConfig = config.prd_review
+    review_cfg: PrdReviewConfig = config.prd_review
     if not review_cfg.enabled:
         console.print("[dim]PRD review disabled — skipping[/dim]")
         return
@@ -84,7 +84,7 @@ def convert_prd_to_json(prd_file: Path, worktree_path: Path, config: Config) -> 
     Returns the path to prd.json.
     """
     console.print("[bold cyan]\n── Step: Convert PRD to prd.json ──[/bold cyan]")
-    tool = make_tool("claude", config)
+    tool = make_tool(config.prd_tool, config)
     prompt = (
         f"Convert the PRD at {prd_file} to prd.json format using the /ralph skill. "
         "Save the output to scripts/ralph/prd.json"
