@@ -26,22 +26,57 @@ pip install -e .
 ## Usage
 
 ```bash
-# Minimal
+# Zero-config (uses built-in defaults)
 ralph++ --feature "add user authentication"
 
-# With options
+# Point at a specific repo
+ralph++ --repo /path/to/repo --feature "add user authentication"
+
+# With explicit options
 ralph++ \
   --feature "add user authentication" \
   --repo /path/to/repo \
-  --config ralph++.yaml \
-  --claude-config ~/.claude \
-  --codex-config ~/.codex \
+  --mode orchestrated \
   --max-iters 20
 ```
 
 ## Configuration
 
-Copy `ralph++.yaml.example` to `ralph++.yaml` and edit to suit your setup.
+ralph++ works with zero configuration on a machine that has `claude`, `codex`,
+and `ralph-sandbox` installed in standard locations. For customisation, config
+files are loaded in layers (later wins):
+
+1. **Built-in defaults** — sensible values for all settings
+2. **User config** — `~/.config/ralph-plus-plus/config.yaml` or `~/.ralph++.yaml`
+3. **Project config** — `<repo>/.ralph/ralph++.yaml` or `<repo>/ralph++.yaml`
+4. **CLI flags** — highest precedence
+
+### Inspect effective config
+
+```bash
+ralph++ config                          # show merged defaults
+ralph++ config --repo /path/to/repo     # include project config
+```
+
+### Sandbox resolution
+
+If `ralph.sandbox_dir` is not set, ralph++ resolves the sandbox automatically:
+
+1. `RALPH_SANDBOX_DIR` environment variable
+2. `ralph-sandbox` on `PATH`
+3. Sibling checkout (`../ralph-sandbox` relative to `--repo`)
+
+### Test command auto-detection
+
+When `orchestrated.run_tests_between_steps` is enabled but `test_commands` is
+empty, ralph++ auto-detects commands for common project types (Makefile, pytest,
+npm, cargo, go).
+
+### Examples
+
+- [`examples/user-config.yaml`](examples/user-config.yaml) — machine-local preferences
+- [`examples/project-config.yaml`](examples/project-config.yaml) — repo-specific settings
+- [`ralph++.yaml.example`](ralph++.yaml.example) — full reference with all options
 
 ## Requirements
 

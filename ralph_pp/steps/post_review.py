@@ -6,7 +6,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ..config import Config, ReviewConfig
+from ..config import Config, PostReviewConfig
 from ..tools import make_tool
 
 console = Console()
@@ -17,7 +17,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
     After the Ralph sandbox completes, run a full review of the implementation
     against prd.json. Iteratively fix issues until LGTM or max_cycles reached.
     """
-    review_cfg: ReviewConfig = config.post_review
+    review_cfg: PostReviewConfig = config.post_review
     if not review_cfg.enabled:
         console.print("[dim]Post-run review disabled — skipping[/dim]")
         return

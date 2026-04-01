@@ -4,22 +4,26 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ralph_pp.config import Config, ReviewConfig, ToolConfig
+from ralph_pp.config import Config, PostReviewConfig, PrdReviewConfig, ToolConfig
 from ralph_pp.steps.post_review import post_review_loop
 from ralph_pp.steps.prd import review_prd_loop
 from ralph_pp.tools.base import ToolResult
 
 
-def _make_config(review_cfg: ReviewConfig | None = None) -> Config:
+def _make_config(
+    prd_review: PrdReviewConfig | None = None,
+    post_review: PostReviewConfig | None = None,
+) -> Config:
     cfg = Config(
         tools={
             "claude": ToolConfig(command="claude", args=["--print"], stdin="{prompt}"),
             "codex": ToolConfig(command="codex", args=["{prompt}"]),
         }
     )
-    if review_cfg:
-        cfg.prd_review = review_cfg
-        cfg.post_review = review_cfg
+    if prd_review:
+        cfg.prd_review = prd_review
+    if post_review:
+        cfg.post_review = post_review
     return cfg
 
 
@@ -33,7 +37,7 @@ def _fail_result(output: str = "segfault") -> ToolResult:
 
 class TestPrdReviewLoopToolFailures:
     def test_reviewer_failure_raises(self, tmp_path):
-        review_cfg = ReviewConfig(
+        review_cfg = PrdReviewConfig(
             reviewer="codex",
             fixer="claude",
             reviewer_prompt="Review {prd_file}",
@@ -41,7 +45,7 @@ class TestPrdReviewLoopToolFailures:
             max_cycles=3,
             enabled=True,
         )
-        config = _make_config(review_cfg)
+        config = _make_config(prd_review=review_cfg)
         prd_file = tmp_path / "tasks" / "prd.md"
         prd_file.parent.mkdir(parents=True)
         prd_file.write_text("# PRD")
@@ -60,7 +64,7 @@ class TestPrdReviewLoopToolFailures:
         fixer_mock.run.assert_not_called()
 
     def test_fixer_failure_raises(self, tmp_path):
-        review_cfg = ReviewConfig(
+        review_cfg = PrdReviewConfig(
             reviewer="codex",
             fixer="claude",
             reviewer_prompt="Review {prd_file}",
@@ -68,7 +72,7 @@ class TestPrdReviewLoopToolFailures:
             max_cycles=3,
             enabled=True,
         )
-        config = _make_config(review_cfg)
+        config = _make_config(prd_review=review_cfg)
         prd_file = tmp_path / "tasks" / "prd.md"
         prd_file.parent.mkdir(parents=True)
         prd_file.write_text("# PRD")
@@ -88,7 +92,7 @@ class TestPrdReviewLoopToolFailures:
 
 class TestPostReviewLoopToolFailures:
     def test_reviewer_failure_raises(self, tmp_path):
-        review_cfg = ReviewConfig(
+        review_cfg = PostReviewConfig(
             reviewer="codex",
             fixer="claude",
             reviewer_prompt="Review {prd_file}",
@@ -96,7 +100,7 @@ class TestPostReviewLoopToolFailures:
             max_cycles=3,
             enabled=True,
         )
-        config = _make_config(review_cfg)
+        config = _make_config(post_review=review_cfg)
         prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
         prd_json.parent.mkdir(parents=True)
         prd_json.write_text("{}")
@@ -115,7 +119,7 @@ class TestPostReviewLoopToolFailures:
         fixer_mock.run.assert_not_called()
 
     def test_fixer_failure_raises(self, tmp_path):
-        review_cfg = ReviewConfig(
+        review_cfg = PostReviewConfig(
             reviewer="codex",
             fixer="claude",
             reviewer_prompt="Review {prd_file}",
@@ -123,7 +127,7 @@ class TestPostReviewLoopToolFailures:
             max_cycles=3,
             enabled=True,
         )
-        config = _make_config(review_cfg)
+        config = _make_config(post_review=review_cfg)
         prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
         prd_json.parent.mkdir(parents=True)
         prd_json.write_text("{}")

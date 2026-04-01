@@ -13,7 +13,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ..config import Config, OrchestratedConfig
+from ..config import Config, OrchestratedConfig, resolve_sandbox_dir
 from ..tools import make_tool
 
 console = Console()
@@ -33,14 +33,8 @@ def run_sandbox(worktree_path: Path, config: Config) -> bool:
 
 def _sandbox_wrapper(config: Config) -> Path:
     """Resolve the path to bin/ralph-sandbox."""
-    sandbox_dir = Path(config.ralph.sandbox_dir).expanduser().resolve()
-    wrapper = sandbox_dir / "bin" / "ralph-sandbox"
-    if not wrapper.is_file():
-        raise FileNotFoundError(
-            f"ralph-sandbox wrapper not found at {wrapper}. "
-            f"Set ralph.sandbox_dir in config to the ralph-sandbox checkout."
-        )
-    return wrapper
+    sandbox_dir = resolve_sandbox_dir(config)
+    return sandbox_dir / "bin" / "ralph-sandbox"
 
 
 def _session_runner_path(config: Config) -> Path:
