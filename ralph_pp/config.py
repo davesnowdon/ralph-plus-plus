@@ -13,6 +13,144 @@ from .detection import detect_test_commands
 
 logger = logging.getLogger(__name__)
 
+# ── default prompt constants ────────────────────────────────────────
+
+_PRD_REVIEWER_PROMPT = """\
+Read the PRD at {prd_file}.
+
+Evaluate whether it is:
+- complete
+- unambiguous
+- implementable as a sequence of small independent user stories
+- testable with concrete acceptance criteria
+- explicit about constraints, edge cases, and non-goals where relevant
+
+If the PRD is fully satisfactory, output exactly:
+LGTM
+
+Otherwise, output a numbered list of issues.
+
+For each issue include:
+- severity: critical | major | minor
+- section: the relevant PRD section or story
+- problem: what is unclear, missing, inconsistent, or too broad
+- consequence: why this would cause implementation or review problems
+- recommended fix: the smallest concrete change that would resolve it
+
+Do not rewrite the PRD yourself. Only review it."""
+
+_PRD_FIXER_PROMPT = """\
+The following issues were found in the PRD at {prd_file}:
+
+{findings}
+
+Revise the PRD in place to resolve these issues.
+
+Requirements:
+- preserve the original feature intent unless the findings require clarification
+- keep stories small, implementation-ready, and independently testable
+- add or tighten acceptance criteria where needed
+- make ambiguities explicit rather than leaving them implied
+- keep the document concise and structured
+- do not add speculative scope that is not justified by the feature request or findings
+
+Do not output a summary instead of making the edits. Update the PRD itself."""
+
+_POST_REVIEWER_PROMPT = """\
+Read the implementation and the requirements in {prd_file}.
+
+Review whether the code fully satisfies every required story and acceptance criterion.
+
+Check for:
+- missing functionality
+- incorrect behavior
+- regressions
+- edge-case handling
+- obvious design or contract violations
+- missing or inadequate tests
+- mismatches between the implementation and the PRD
+
+If everything looks correct, output exactly:
+LGTM
+
+Otherwise, output a numbered list of findings.
+
+For each finding include:
+- severity: critical | major | minor
+- file: exact path(s) if applicable
+- problem: what is wrong or missing
+- evidence: the concrete mismatch, bug risk, or regression
+- recommended fix: the smallest reasonable corrective action
+
+Be specific. Do not give vague style feedback unless it affects
+correctness or maintainability materially."""
+
+_POST_FIXER_PROMPT = """\
+The following issues were found in the final implementation against {prd_file}:
+
+{findings}
+
+Fix these issues in the codebase.
+
+Requirements:
+- address every finding unless two findings are duplicates
+- preserve already-correct behavior
+- avoid unrelated refactors
+- add or update tests where needed
+- keep changes minimal but sufficient
+- ensure the implementation remains aligned with the PRD
+
+Do not just describe the fixes. Make the code changes."""
+
+_ORCHESTRATED_REVIEW_PROMPT = """\
+Review the latest iteration against the requirements in {prd_file}.
+
+Start from this git diff:
+
+{diff}
+
+You may inspect the changed files and nearby code as needed.
+
+Check for:
+- requirement mismatches
+- broken or incomplete behavior
+- regressions
+- missing edge-case handling
+- unsafe assumptions
+- missing tests or inadequate test updates
+
+If the iteration is acceptable, output exactly:
+LGTM
+
+Otherwise, output a numbered list of findings.
+
+For each finding include:
+- severity: critical | major | minor
+- file: exact path(s) if applicable
+- problem: what is wrong, risky, or incomplete
+- evidence: what in the diff or code supports the finding
+- recommended fix: the smallest reasonable corrective action
+
+Only report findings that materially affect correctness, completeness, or reliability."""
+
+_ORCHESTRATED_FIX_PROMPT = """\
+The following issues were found in the latest code changes against {prd_file}:
+
+{findings}
+
+Fix these issues in the repository.
+
+Requirements:
+- resolve each finding concretely
+- preserve correct existing changes
+- avoid unrelated edits
+- keep the patch as small as possible while fully fixing the problems
+- update tests if needed
+- do not claim success without making the changes
+
+If some finding is invalid or already resolved, handle that
+conservatively and focus on the remaining real issues."""
+
 
 @dataclass
 class ToolConfig:
@@ -37,28 +175,14 @@ class ReviewConfig:
 
 @dataclass
 class PrdReviewConfig(ReviewConfig):
-    reviewer_prompt: str = (
-        "Read the PRD at {prd_file}. Evaluate whether it is complete, unambiguous, "
-        "and implementable as a series of independent user stories. List any flaws, "
-        "omissions, or areas for improvement. If the PRD is fully satisfactory, "
-        "output exactly: LGTM"
-    )
-    fixer_prompt: str = (
-        "The following issues were found in the PRD at {prd_file}.\nPlease fix them:\n\n{findings}"
-    )
+    reviewer_prompt: str = _PRD_REVIEWER_PROMPT
+    fixer_prompt: str = _PRD_FIXER_PROMPT
 
 
 @dataclass
 class PostReviewConfig(ReviewConfig):
-    reviewer_prompt: str = (
-        "Read prd.json and review the entire implementation. Does the code fully "
-        "satisfy every user story? List any flaws, omissions or areas for "
-        "improvement. If fully satisfied, output exactly: LGTM"
-    )
-    fixer_prompt: str = (
-        "The following issues were found in the final implementation.\n"
-        "Please fix them and ensure all tests pass:\n\n{findings}"
-    )
+    reviewer_prompt: str = _POST_REVIEWER_PROMPT
+    fixer_prompt: str = _POST_FIXER_PROMPT
 
 
 @dataclass
@@ -79,16 +203,8 @@ class OrchestratedConfig:
     run_tests_between_steps: bool = False
     test_commands: list[str] = field(default_factory=lambda: list[str]())
     backout_on_failure: bool = True
-    review_prompt: str = (
-        "Review the following git diff against the requirements in {prd_file}.\n"
-        "Identify any flaws, omissions, regressions, or test failures.\n"
-        "If everything looks correct, output exactly: LGTM\n\n"
-        "GIT DIFF:\n{diff}"
-    )
-    fix_prompt: str = (
-        "The following issues were found in the latest code changes against {prd_file}.\n"
-        "Please fix them and ensure all tests pass:\n\n{findings}"
-    )
+    review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
+    fix_prompt: str = _ORCHESTRATED_FIX_PROMPT
     prompt_template: str | None = None
 
 

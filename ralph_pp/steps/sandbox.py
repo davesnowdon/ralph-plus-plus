@@ -19,6 +19,23 @@ from ..tools import make_tool
 
 console = Console()
 
+_FALLBACK_CODER_PROMPT = """\
+Read scripts/ralph/prd.json and implement the next smallest incomplete user story.
+
+Requirements:
+- make only the changes needed for that story and its acceptance criteria
+- inspect the surrounding code before editing
+- preserve existing behavior unless the story requires a change
+- update or add tests when appropriate
+- keep the repository in a coherent, runnable state
+- commit your changes if your workflow expects it
+
+If all stories are complete, output exactly:
+<promise>COMPLETE</promise>
+
+Do not output that completion signal unless every story in prd.json is complete.
+"""
+
 COMPLETE_SIGNAL = "<promise>COMPLETE</promise>"
 
 
@@ -182,11 +199,7 @@ def _setup_worktree_files(worktree_path: Path) -> None:
         if repo_claude.exists():
             shutil.copy2(repo_claude, claude_md)
         else:
-            claude_md.write_text(
-                "Read scripts/ralph/prd.json and implement the next incomplete user story.\n"
-                "After implementing, run tests and commit your changes.\n"
-                "If all stories are complete, output: <promise>COMPLETE</promise>\n"
-            )
+            claude_md.write_text(_FALLBACK_CODER_PROMPT)
 
     progress = ralph_dir / "progress.txt"
     if not progress.exists():
