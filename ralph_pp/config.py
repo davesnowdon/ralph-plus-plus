@@ -116,7 +116,7 @@ Review the latest iteration against the requirements in {prd_file}.
 Start from this git diff:
 
 {diff}
-
+{previous_findings}
 You may inspect the changed files and nearby code as needed.
 
 Check for:

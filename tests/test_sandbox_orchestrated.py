@@ -120,6 +120,7 @@ class TestCoderInfraFailure:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -154,6 +155,7 @@ class TestCoderInfraFailure:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -203,6 +205,7 @@ class TestFixerInfraFailure:
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -247,6 +250,7 @@ class TestTestFailureBlocking:
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -297,6 +301,7 @@ class TestFixInPlaceTestRerun:
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
             patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -356,6 +361,7 @@ class TestFixInPlaceTestRerun:
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
             patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -395,6 +401,7 @@ class TestReviewerInfraFailure:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool,
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -465,6 +472,7 @@ class TestPromptPropagation:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -539,6 +547,7 @@ class TestRetriesExhaustedAborts:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -573,6 +582,7 @@ class TestRetriesExhaustedAborts:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -583,3 +593,168 @@ class TestRetriesExhaustedAborts:
         assert result is False, "Should fail when fix cycles exhausted"
         # 1 coder + 1 fixer = 2 subprocess calls (not counting rev-parse/diff)
         assert coder_call_count == 2, "Should run coder once + fixer once, then abort"
+
+
+class TestCommitIfDirty:
+    """_commit_if_dirty stages and commits uncommitted work."""
+
+    def test_creates_commit_when_dirty(self, tmp_path):
+        """Dirty working tree → commit created, returns True."""
+        from ralph_pp.steps.sandbox import _commit_if_dirty
+
+        # Set up a real git repo
+        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
+        old_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        # Create an uncommitted file
+        (tmp_path / "new_file.py").write_text("print('hello')")
+
+        result = _commit_if_dirty(tmp_path, "test commit")
+
+        assert result is True
+        new_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert old_sha != new_sha, "HEAD should have moved"
+
+    def test_noop_when_clean(self, tmp_path):
+        """Clean working tree → no commit, returns False."""
+        from ralph_pp.steps.sandbox import _commit_if_dirty
+
+        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
+
+        result = _commit_if_dirty(tmp_path, "should not appear")
+
+        assert result is False
+
+
+class TestPreviousFindings:
+    """Reviewer receives previous findings context in fix cycles."""
+
+    def test_previous_findings_passed_to_reviewer(self, tmp_path):
+        """After a fix cycle, the reviewer prompt includes previous findings."""
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=1)
+
+        captured_prompt = None
+
+        def mock_tool_run(prompt, cwd):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return ToolResult(output="LGTM", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = mock_tool_run
+            mock_make_tool.return_value = mock_tool
+
+            _review_iteration(
+                iteration=1,
+                diff="some diff",
+                worktree_path=worktree,
+                config=config,
+                previous_findings="Line 42: missing null check",
+            )
+
+        assert captured_prompt is not None
+        assert "previous review cycle found these issues" in captured_prompt
+        assert "Line 42: missing null check" in captured_prompt
+
+    def test_no_previous_findings_on_first_review(self, tmp_path):
+        """First review has no previous findings context."""
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=1)
+
+        captured_prompt = None
+
+        def mock_tool_run(prompt, cwd):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return ToolResult(output="LGTM", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = mock_tool_run
+            mock_make_tool.return_value = mock_tool
+
+            _review_iteration(
+                iteration=1,
+                diff="some diff",
+                worktree_path=worktree,
+                config=config,
+            )
+
+        assert captured_prompt is not None
+        assert "previous review cycle" not in captured_prompt
+
+    def test_fixer_changes_committed(self, tmp_path):
+        """In fix-in-place mode, _commit_if_dirty is called after fixer runs."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=1, backout_on_failure=False
+        )
+
+        review_count = 0
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="output")
+
+        def mock_review(*args, **kwargs):
+            nonlocal review_count
+            review_count += 1
+            if review_count == 1:
+                return (False, "Issues found")
+            return (True, "LGTM")
+
+        def mock_fixer(findings, worktree_path, config):
+            return _fake_subprocess_run(returncode=0, stdout="fixed")
+
+        commit_calls = []
+
+        def mock_commit(path, message):
+            commit_calls.append(message)
+            return False
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", side_effect=mock_commit),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # Should have committed after coder and after fixer
+        assert any("coder" in m for m in commit_calls), "Should commit after coder"
+        assert any("fixer" in m for m in commit_calls), "Should commit after fixer"

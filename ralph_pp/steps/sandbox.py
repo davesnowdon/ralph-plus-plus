@@ -142,7 +142,7 @@ def _render_prompt(template: str, **kwargs: str) -> str:
 
 def _get_diff(worktree_path: Path, from_sha: str) -> str:
     result = subprocess.run(
-        ["git", "diff", from_sha, "HEAD"],
+        ["git", "diff", from_sha],
         cwd=worktree_path,
         capture_output=True,
         text=True,
@@ -150,6 +150,40 @@ def _get_diff(worktree_path: Path, from_sha: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"git diff failed (exit {result.returncode}): {result.stderr.strip()}")
     return result.stdout or "(no diff)"
+
+
+def _commit_if_dirty(worktree_path: Path, message: str) -> bool:
+    """Stage and commit all changes if the working tree has uncommitted work.
+
+    Returns True if a commit was created, False if tree was clean.
+    """
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode != 0:
+        raise RuntimeError(f"git status failed: {status.stderr.strip()}")
+    if not status.stdout.strip():
+        return False
+    add = subprocess.run(
+        ["git", "add", "-A"],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+    )
+    if add.returncode != 0:
+        raise RuntimeError(f"git add failed: {add.stderr.strip()}")
+    commit = subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+    )
+    if commit.returncode != 0:
+        raise RuntimeError(f"git commit failed: {commit.stderr.strip()}")
+    return True
 
 
 # ── Delegated mode ─────────────────────────────────────────────────────
@@ -211,13 +245,27 @@ def _review_iteration(
     diff: str,
     worktree_path: Path,
     config: Config,
+    previous_findings: str = "",
 ) -> tuple[bool, str]:
     """Run reviewer on the iteration diff. Returns (passed, findings)."""
     orch = config.orchestrated
     reviewer = make_tool(orch.reviewer, config)
     prd_file = str(worktree_path / "scripts" / "ralph" / "prd.json")
 
-    review_prompt = _render_prompt(orch.review_prompt, diff=diff, prd_file=prd_file)
+    if previous_findings:
+        context = (
+            "\nThe previous review cycle found these issues (which have since "
+            "been addressed by a fix pass). Focus on whether the fixes are "
+            "adequate and whether any NEW issues remain. Do not re-raise issues "
+            "that have been resolved:\n\n"
+            f"{previous_findings}\n"
+        )
+    else:
+        context = ""
+
+    review_prompt = _render_prompt(
+        orch.review_prompt, diff=diff, prd_file=prd_file, previous_findings=context
+    )
     result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
     if not result.success:
         raise RuntimeError(
@@ -350,6 +398,9 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 console.print("[green]Ralph signaled COMPLETE[/green]")
                 return True
 
+            # Force-commit any uncommitted coder changes
+            _commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
+
             # Run tests/linter (optional)
             tests_failed = False
             if orch.run_tests_between_steps and orch.test_commands:
@@ -364,7 +415,9 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
             # Review changes
             diff = _get_diff(worktree_path, pre_sha)
-            passed, findings = _review_iteration(iteration, diff, worktree_path, config)
+            passed, findings = _review_iteration(
+                iteration, diff, worktree_path, config, previous_findings=last_findings
+            )
             last_findings = findings
 
             if passed and not tests_failed:
@@ -400,6 +453,12 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         )
                         break
 
+                    # Force-commit any uncommitted fixer changes
+                    _commit_if_dirty(
+                        worktree_path,
+                        f"ralph: fixer cycle {fix_cycle} iteration {iteration}",
+                    )
+
                     # Re-run tests after fix (if enabled)
                     if orch.run_tests_between_steps and orch.test_commands:
                         console.print("  [dim]Re-running test commands after fix...[/dim]")
@@ -409,7 +468,9 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
                     # Re-review after fix
                     diff = _get_diff(worktree_path, pre_sha)
-                    passed, findings = _review_iteration(iteration, diff, worktree_path, config)
+                    passed, findings = _review_iteration(
+                        iteration, diff, worktree_path, config, previous_findings=findings
+                    )
                     last_findings = findings
                     if passed:
                         iteration_passed = True
