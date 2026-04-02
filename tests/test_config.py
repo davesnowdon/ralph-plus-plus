@@ -654,6 +654,47 @@ def test_provenance_cli_overrides(tmp_path):
     tmp.unlink()
 
 
+def test_setup_cmd_prepends_to_post_worktree_create():
+    """--setup-cmd values are prepended to post_worktree_create hooks."""
+    cfg = load_config(None)
+    cfg.hooks["post_worktree_create"] = ["existing-hook"]
+
+    setup_cmd = ("uv sync", "make install")
+    existing = cfg.hooks.get("post_worktree_create", [])
+    cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
+
+    assert cfg.hooks["post_worktree_create"] == [
+        "uv sync",
+        "make install",
+        "existing-hook",
+    ]
+
+
+def test_setup_cmd_empty_leaves_hooks_unchanged():
+    """When no --setup-cmd is given, hooks are unchanged."""
+    cfg = load_config(None)
+    cfg.hooks["post_worktree_create"] = ["existing-hook"]
+
+    setup_cmd: tuple[str, ...] = ()
+    if setup_cmd:
+        existing = cfg.hooks.get("post_worktree_create", [])
+        cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
+
+    assert cfg.hooks["post_worktree_create"] == ["existing-hook"]
+
+
+def test_setup_cmd_creates_hook_when_none_configured():
+    """--setup-cmd works even when no post_worktree_create hooks exist."""
+    cfg = load_config(None)
+    assert "post_worktree_create" not in cfg.hooks
+
+    setup_cmd = ("uv sync --group dev",)
+    existing = cfg.hooks.get("post_worktree_create", [])
+    cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
+
+    assert cfg.hooks["post_worktree_create"] == ["uv sync --group dev"]
+
+
 def test_provenance_defaults_not_in_sources():
     """Keys that were never set by any layer should show as 'default'."""
     cfg, prov = load_config_with_provenance(None)

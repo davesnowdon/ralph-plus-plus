@@ -160,6 +160,12 @@ _sandbox_dir_option = click.option(
 )
 @_sandbox_dir_option
 @click.option(
+    "--setup-cmd",
+    multiple=True,
+    help="Shell command to run in the worktree after creation "
+    "(repeatable; prepended to post_worktree_create hooks).",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -175,6 +181,7 @@ def run(
     mode: str | None,
     skip_prd_review: bool,
     skip_post_review: bool,
+    setup_cmd: tuple[str, ...],
     sandbox_dir: Path | None,
     dry_run: bool,
 ) -> None:
@@ -189,6 +196,9 @@ def run(
         cfg.ralph.max_iterations = max_iters
     if mode is not None:
         cfg.ralph.mode = mode
+    if setup_cmd:
+        existing = cfg.hooks.get("post_worktree_create", [])
+        cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
 
     orchestrator = Orchestrator(feature=feature, config=cfg, dry_run=dry_run)
     orchestrator.run(
