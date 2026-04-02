@@ -598,18 +598,28 @@ class TestRetriesExhaustedAborts:
 class TestCommitIfDirty:
     """_commit_if_dirty stages and commits uncommitted work."""
 
+    @staticmethod
+    def _init_repo(path):
+        """Create a git repo with user config (needed in CI where no global config exists)."""
+        subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=path, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=path, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=path, check=True, capture_output=True,
+        )
+
     def test_creates_commit_when_dirty(self, tmp_path):
         """Dirty working tree → commit created, returns True."""
         from ralph_pp.steps.sandbox import _commit_if_dirty
 
-        # Set up a real git repo
-        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "--allow-empty", "-m", "init"],
-            cwd=tmp_path,
-            check=True,
-            capture_output=True,
-        )
+        self._init_repo(tmp_path)
         old_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=tmp_path,
@@ -635,13 +645,7 @@ class TestCommitIfDirty:
         """Clean working tree → no commit, returns False."""
         from ralph_pp.steps.sandbox import _commit_if_dirty
 
-        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "--allow-empty", "-m", "init"],
-            cwd=tmp_path,
-            check=True,
-            capture_output=True,
-        )
+        self._init_repo(tmp_path)
 
         result = _commit_if_dirty(tmp_path, "should not appear")
 
