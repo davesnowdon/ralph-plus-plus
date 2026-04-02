@@ -35,7 +35,12 @@ def _make_config(
 
     return Config(
         tools={
-            "claude": ToolConfig(command="claude", args=["--print"], stdin="{prompt}"),
+            "claude": ToolConfig(
+                command="claude",
+                args=["--print"],
+                stdin="{prompt}",
+                allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"],
+            ),
             "codex": ToolConfig(command="codex", args=["{prompt}"]),
         },
         ralph=RalphConfig(

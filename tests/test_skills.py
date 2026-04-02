@@ -160,7 +160,7 @@ class TestEnsurePrdSkills:
             tools={
                 "claude-interactive": ToolConfig(
                     command=tool_command,
-                    args=["-p", "{prompt}"],
+                    args=["{prompt}"],
                     interactive=True,
                 ),
             },

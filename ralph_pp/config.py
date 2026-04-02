@@ -466,13 +466,14 @@ def _build_config(data: dict[str, Any]) -> Config:
             "claude": ToolConfig(
                 type="cli",
                 command="claude",
-                args=["--dangerously-skip-permissions", "--print"],
+                args=["--print"],
                 stdin="{prompt}",
+                allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"],
             ),
             "claude-interactive": ToolConfig(
                 type="cli",
                 command="claude",
-                args=["-p", "{prompt}"],
+                args=["{prompt}"],
                 interactive=True,
                 allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"],
             ),

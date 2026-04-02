@@ -31,13 +31,14 @@ tools:
   claude:
     type: cli
     command: claude
-    args: ["--dangerously-skip-permissions", "--print"]
+    args: ["--print"]
     stdin: "{prompt}"
+    allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"]
 
   claude-interactive:
     type: cli
     command: claude
-    args: ["-p", "{prompt}"]
+    args: ["{prompt}"]
     interactive: true
     allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"]
 

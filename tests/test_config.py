@@ -45,8 +45,17 @@ def test_load_empty_config():
         "Grep",
         "Bash(git:*)",
     ]
-    assert "-p" in cfg.tools["claude-interactive"].args
+    assert "-p" not in cfg.tools["claude-interactive"].args
     assert cfg.tools["claude"].interactive is False
+    assert "--dangerously-skip-permissions" not in cfg.tools["claude"].args
+    assert cfg.tools["claude"].allowed_tools == [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash(git:*)",
+    ]
 
 
 def test_load_config_from_file():
