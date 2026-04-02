@@ -604,15 +604,21 @@ class TestCommitIfDirty:
         subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
         subprocess.run(
             ["git", "config", "user.email", "test@test.com"],
-            cwd=path, check=True, capture_output=True,
+            cwd=path,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "config", "user.name", "Test"],
-            cwd=path, check=True, capture_output=True,
+            cwd=path,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "commit", "--allow-empty", "-m", "init"],
-            cwd=path, check=True, capture_output=True,
+            cwd=path,
+            check=True,
+            capture_output=True,
         )
 
     def test_creates_commit_when_dirty(self, tmp_path):
