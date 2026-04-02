@@ -57,6 +57,14 @@ def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
         "non-goals, and technical considerations.\n\n"
         "Save the PRD to tasks/prd.md"
     )
+    tool_cfg = config.get_tool(config.prd_tool)
+    if tool_cfg.interactive:
+        console.print(
+            "\n[bold yellow]When Claude finishes generating the PRD, "
+            "type /exit to return to ralph++.\n"
+            "Do not use Ctrl-C — it may corrupt Claude's configuration.[/bold yellow]\n"
+        )
+
     result = tool.run(prompt=prompt, cwd=worktree_path)
     if not result.success:
         raise RuntimeError(f"PRD generation failed (exit {result.exit_code})")
@@ -147,13 +155,49 @@ def convert_prd_to_json(prd_file: Path, worktree_path: Path, config: Config) -> 
     Returns the path to prd.json.
     """
     console.print("[bold cyan]\n── Step: Convert PRD to prd.json ──[/bold cyan]")
-    tool = make_tool(config.prd_tool, config)
+    tool = make_tool(config.prd_json_tool, config)
     prompt = (
-        f"Convert the PRD at {prd_file} to structured JSON format.\n\n"
-        "You have the /ralph skill available. Use it to convert the PRD into an "
-        "executable prd.json with properly sized user stories, dependency ordering, "
-        "and verifiable acceptance criteria.\n\n"
-        "Save the output to scripts/ralph/prd.json"
+        f"Read the PRD at {prd_file} and convert it to structured JSON format.\n\n"
+        "Save the output to scripts/ralph/prd.json\n\n"
+        "## Output Format\n\n"
+        "```json\n"
+        "{\n"
+        '  "project": "[Project Name]",\n'
+        '  "branchName": "ralph/[feature-name-kebab-case]",\n'
+        '  "description": "[Feature description from PRD]",\n'
+        '  "userStories": [\n'
+        "    {\n"
+        '      "id": "US-001",\n'
+        '      "title": "[Story title]",\n'
+        '      "description": "As a [user], I want [feature] so that [benefit]",\n'
+        '      "acceptanceCriteria": [\n'
+        '        "Criterion 1",\n'
+        '        "Criterion 2",\n'
+        '        "Typecheck passes"\n'
+        "      ],\n"
+        '      "priority": 1,\n'
+        '      "passes": false,\n'
+        '      "notes": ""\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "```\n\n"
+        "## Rules\n\n"
+        "1. **Story size**: Each story must be completable in ONE iteration (one context "
+        "window). If you cannot describe the change in 2-3 sentences, split it.\n"
+        "   - Right-sized: add a database column, add a UI component, update a server action\n"
+        "   - Too big: build entire dashboard, add authentication, refactor API\n\n"
+        "2. **Dependency ordering**: Stories execute in priority order. Earlier stories "
+        "must NOT depend on later ones.\n"
+        "   - Correct: schema → backend logic → UI components → dashboards\n\n"
+        "3. **Acceptance criteria**: Must be verifiable, not vague.\n"
+        "   - Good: \"Add status column with default 'pending'\"\n"
+        '   - Bad: "Works correctly", "Good UX"\n\n'
+        '4. **Always include** "Typecheck passes" as final criterion in every story.\n\n'
+        '5. **For UI stories**, also include "Verify in browser using dev-browser skill".\n\n'
+        "6. **IDs**: Sequential (US-001, US-002, etc.)\n\n"
+        '7. **All stories**: Set `passes: false` and `notes: ""`\n\n'
+        "8. **branchName**: Derive from feature name, kebab-case, prefixed with `ralph/`\n"
     )
     result = tool.run(prompt=prompt, cwd=worktree_path)
     if not result.success:

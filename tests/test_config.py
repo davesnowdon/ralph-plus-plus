@@ -379,6 +379,38 @@ def test_validate_config_bad_prd_tool():
         validate_config(cfg)
 
 
+# ── prd_json_tool tests ──────────────────────────────────────────────
+
+
+def test_prd_json_tool_default():
+    """Default prd_json_tool should be 'claude'."""
+    cfg = load_config(None)
+    assert cfg.prd_json_tool == "claude"
+
+
+def test_prd_json_tool_from_file():
+    """prd_json_tool should be loadable from YAML."""
+    data = {"prd_json_tool": "codex"}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp_path = Path(f.name)
+
+    cfg = load_config(tmp_path)
+    assert cfg.prd_json_tool == "codex"
+    tmp_path.unlink()
+
+
+def test_validate_config_bad_prd_json_tool():
+    import pytest
+
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
+        prd_json_tool="nonexistent",
+    )
+    with pytest.raises(ValueError, match="prd_json_tool"):
+        validate_config(cfg)
+
+
 def test_interactive_field_from_yaml():
     """interactive and allowed_tools fields in tools YAML should be parsed correctly."""
     data = {
@@ -582,6 +614,7 @@ def test_format_effective_config():
     parsed = yaml.safe_load(output)
     assert parsed["branch_prefix"] == "ralph/"
     assert parsed["prd_tool"] == "claude-interactive"
+    assert parsed["prd_json_tool"] == "claude"
     assert "claude" in parsed["tools"]
 
 

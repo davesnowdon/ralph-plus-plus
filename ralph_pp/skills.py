@@ -168,6 +168,8 @@ def ensure_prd_skills(config: Config, project_path: Path) -> None:
     If the prd_tool is not Claude-based, this is a no-op.
     If skills are missing, prompts the user to install them or exits.
     """
+    # Check the interactive PRD tool — skills are needed for /prd generation.
+    # The JSON conversion step (prd_json_tool) embeds its own instructions.
     prd_tool_cfg = config.get_tool(config.prd_tool)
     if not is_claude_tool(prd_tool_cfg):
         return

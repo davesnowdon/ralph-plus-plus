@@ -232,6 +232,7 @@ class Config:
     # Tools
     tools: dict[str, ToolConfig] = field(default_factory=lambda: dict[str, ToolConfig]())
     prd_tool: str = "claude-interactive"  # tool for PRD generation and conversion
+    prd_json_tool: str = "claude"  # tool for PRD-to-JSON conversion (non-interactive)
 
     # Review stages
     prd_review: PrdReviewConfig = field(default_factory=PrdReviewConfig)
@@ -452,6 +453,7 @@ def _build_config(data: dict[str, Any]) -> Config:
     cfg.branch_prefix = data.get("branch_prefix", cfg.branch_prefix)
     cfg.branch_suffix_length = int(data.get("branch_suffix_length", cfg.branch_suffix_length))
     cfg.prd_tool = data.get("prd_tool", cfg.prd_tool)
+    cfg.prd_json_tool = data.get("prd_json_tool", cfg.prd_json_tool)
 
     if "tools" in data:
         cfg.tools = _parse_tools(data["tools"])
@@ -559,6 +561,9 @@ def validate_config(cfg: Config) -> None:
 
     if cfg.prd_tool not in cfg.tools:
         errors.append(f"prd_tool={cfg.prd_tool!r} not in tools {list(cfg.tools)}")
+
+    if cfg.prd_json_tool not in cfg.tools:
+        errors.append(f"prd_json_tool={cfg.prd_json_tool!r} not in tools {list(cfg.tools)}")
 
     if cfg.ralph.sandbox_tool not in cfg.tools:
         errors.append(

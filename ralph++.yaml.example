@@ -19,6 +19,7 @@ branch_suffix_length: 4             # [built-in] random hex chars for uniqueness
 
 # ── PRD tool ───────────────────────────────────────────────────────────
 prd_tool: claude-interactive         # [user/project] tool for PRD generation/conversion
+prd_json_tool: claude                # [user/project] tool for PRD-to-JSON conversion (non-interactive)
 
 # ── Tool definitions ───────────────────────────────────────────────────
 # [user/project] If omitted, claude and codex defaults are auto-created.
