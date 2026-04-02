@@ -508,3 +508,78 @@ class TestPromptPropagation:
         content = fix_prompt.read_text()
         assert findings_text in content
         assert "prd.json" in content
+
+
+class TestRetriesExhaustedAborts:
+    """When all retries are exhausted the task must fail, not continue to the next iteration."""
+
+    def test_backout_retries_exhausted_returns_false(self, tmp_path):
+        """Backout mode: reviewer rejects every attempt → return False, no iteration 2."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=3, max_iteration_retries=1, backout_on_failure=True
+        )
+
+        coder_call_count = 0
+
+        def mock_subprocess_run(cmd, **kwargs):
+            nonlocal coder_call_count
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            coder_call_count += 1
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return (False, "Major flaws found")
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False, "Should fail when retries exhausted"
+        assert coder_call_count == 2, "Should run initial + 1 retry, then abort (not start iter 2)"
+
+    def test_fix_in_place_exhausted_returns_false(self, tmp_path):
+        """Fix-in-place mode: fixer can't resolve issues → return False."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=3, max_iteration_retries=1, backout_on_failure=False
+        )
+
+        coder_call_count = 0
+
+        def mock_subprocess_run(cmd, **kwargs):
+            nonlocal coder_call_count
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            coder_call_count += 1
+            return _fake_subprocess_run(returncode=0, stdout="coder/fixer output")
+
+        def mock_review(*args, **kwargs):
+            return (False, "Major flaws found")
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False, "Should fail when fix cycles exhausted"
+        # 1 coder + 1 fixer = 2 subprocess calls (not counting rev-parse/diff)
+        assert coder_call_count == 2, "Should run coder once + fixer once, then abort"

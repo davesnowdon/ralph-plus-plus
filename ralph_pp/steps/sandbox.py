@@ -384,10 +384,9 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     _backout_to(worktree_path, pre_sha)
                 else:
                     console.print(
-                        f"  [yellow]⚠ All retries exhausted for iteration "
-                        f"{iteration} — continuing[/yellow]"
+                        f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
                     )
-                    iteration_passed = False
+                    return False
             else:
                 # PATH B: Invoke fixer to fix in-place
                 for fix_cycle in range(1, orch.max_iteration_retries + 1):
@@ -418,9 +417,9 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
                 if not iteration_passed:
                     console.print(
-                        f"  [yellow]⚠ Fix cycles exhausted for iteration "
-                        f"{iteration} — continuing[/yellow]"
+                        f"  [red]✗ Fix cycles exhausted for iteration {iteration} — aborting[/red]"
                     )
+                    return False
                 break  # In fix-in-place mode we don't retry the coder, only the fixer
 
         # Append to progress
