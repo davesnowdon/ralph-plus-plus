@@ -96,11 +96,14 @@ def test_detect_test_commands_wired_into_load_config(tmp_path):
 
 
 def test_detect_test_commands_not_wired_when_disabled(tmp_path):
-    """load_config should NOT auto-populate when run_tests_between_steps is False."""
+    """load_config should NOT auto-populate when both triggers are disabled."""
     (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
     data = {
         "repo_path": str(tmp_path),
-        "orchestrated": {"run_tests_between_steps": False},
+        "orchestrated": {
+            "run_tests_between_steps": False,
+            "auto_allow_test_commands": False,
+        },
     }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         yaml.dump(data, f)

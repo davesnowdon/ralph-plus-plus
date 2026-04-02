@@ -124,8 +124,10 @@ def test_default_orchestrated_config():
     assert orch.fixer == "claude"
     assert orch.max_iteration_retries == 2
     assert orch.run_tests_between_steps is False
-    assert orch.test_commands == []
+    # test_commands may be auto-detected from the repo Makefile
+    assert isinstance(orch.test_commands, list)
     assert orch.backout_on_failure is True
+    assert orch.auto_allow_test_commands is True
     assert "{diff}" in orch.review_prompt
     assert "{findings}" in orch.fix_prompt
     assert orch.prompt_template is None
@@ -256,6 +258,22 @@ def test_load_config_string_false_boolean():
     cfg = load_config(tmp_path)
     assert cfg.orchestrated.backout_on_failure is False
     assert cfg.orchestrated.run_tests_between_steps is False
+    tmp_path.unlink()
+
+
+def test_auto_allow_test_commands_from_file():
+    """auto_allow_test_commands should be parseable from YAML."""
+    data = {
+        "orchestrated": {
+            "auto_allow_test_commands": False,
+        },
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp_path = Path(f.name)
+
+    cfg = load_config(tmp_path)
+    assert cfg.orchestrated.auto_allow_test_commands is False
     tmp_path.unlink()
 
 

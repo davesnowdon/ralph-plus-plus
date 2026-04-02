@@ -213,6 +213,7 @@ class OrchestratedConfig:
     run_tests_between_steps: bool = False
     test_commands: list[str] = field(default_factory=lambda: list[str]())
     backout_on_failure: bool = True
+    auto_allow_test_commands: bool = True
     review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
     fix_prompt: str = _ORCHESTRATED_FIX_PROMPT
     prompt_template: str | None = None
@@ -515,6 +516,10 @@ def _build_config(data: dict[str, Any]) -> Config:
                 o.get("backout_on_failure", defaults.backout_on_failure),
                 defaults.backout_on_failure,
             ),
+            auto_allow_test_commands=_parse_bool(
+                o.get("auto_allow_test_commands", defaults.auto_allow_test_commands),
+                defaults.auto_allow_test_commands,
+            ),
             review_prompt=o.get("review_prompt", defaults.review_prompt),
             fix_prompt=o.get("fix_prompt", defaults.fix_prompt),
             prompt_template=o.get("prompt_template", defaults.prompt_template),
@@ -522,13 +527,16 @@ def _build_config(data: dict[str, Any]) -> Config:
 
     cfg.hooks = data.get("hooks", {})
 
-    # Auto-detect test commands when enabled but not configured
-    if cfg.orchestrated.run_tests_between_steps and not cfg.orchestrated.test_commands:
+    # Auto-detect test commands when needed but not explicitly configured
+    needs_detection = not cfg.orchestrated.test_commands and (
+        cfg.orchestrated.run_tests_between_steps or cfg.orchestrated.auto_allow_test_commands
+    )
+    if needs_detection:
         detected = detect_test_commands(cfg.repo_path)
         if detected:
             cfg.orchestrated.test_commands = detected
             logger.info("Auto-detected test commands: %s", detected)
-        else:
+        elif cfg.orchestrated.run_tests_between_steps:
             logger.warning(
                 "run_tests_between_steps is enabled but no test commands "
                 "configured or detected for %s",

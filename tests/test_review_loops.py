@@ -317,3 +317,76 @@ class TestPromptMaxCycles:
     def test_choice_3_returns_continue(self):
         with patch("ralph_pp.steps.prd.click.prompt", return_value="3"):
             assert prompt_max_cycles("PRD", 3) == "continue"
+
+    def test_custom_continue_label(self, capsys):
+        with patch("ralph_pp.steps.prd.click.prompt", return_value="3"):
+            result = prompt_max_cycles(
+                "Post-run", 3, continue_label="Accept — finish without reviewer approval"
+            )
+        assert result == "continue"
+
+
+class TestPostReviewFixer:
+    def test_fixer_gets_test_command_permissions(self, tmp_path):
+        """When test_commands are configured, the fixer should get augmented Bash permissions."""
+        from ralph_pp.config import OrchestratedConfig
+
+        config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=1))
+        config.orchestrated = OrchestratedConfig(
+            test_commands=["hatch run ci", "pytest"],
+            auto_allow_test_commands=True,
+        )
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text("{}")
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_augmented,
+            patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.return_value = reviewer_mock
+            mock_make_augmented.return_value = fixer_mock
+
+            with pytest.raises(MaxCyclesAbort):
+                post_review_loop(tmp_path, config)
+
+        # Reviewer uses plain make_tool
+        mock_make.assert_called_once_with("codex", config)
+        # Fixer uses augmented make_tool_with_permissions
+        mock_make_augmented.assert_called_once_with("claude", config, ["hatch run ci", "pytest"])
+
+    def test_fixer_not_augmented_when_disabled(self, tmp_path):
+        """When auto_allow_test_commands is False, the fixer uses plain make_tool."""
+        from ralph_pp.config import OrchestratedConfig
+
+        config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=1))
+        config.orchestrated = OrchestratedConfig(
+            test_commands=["hatch run ci"],
+            auto_allow_test_commands=False,
+        )
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text("{}")
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_augmented,
+            patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            with pytest.raises(MaxCyclesAbort):
+                post_review_loop(tmp_path, config)
+
+        mock_make_augmented.assert_not_called()

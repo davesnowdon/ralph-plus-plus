@@ -21,7 +21,11 @@ class MaxCyclesAbort(SystemExit):
         super().__init__("Review aborted by user after max cycles reached")
 
 
-def prompt_max_cycles(phase: str, max_cycles: int) -> str:
+def prompt_max_cycles(
+    phase: str,
+    max_cycles: int,
+    continue_label: str = "Continue — proceed without reviewer approval",
+) -> str:
     """Prompt the user for action when max review cycles are exhausted.
 
     Returns one of: "quit", "retry", "continue".
@@ -33,7 +37,7 @@ def prompt_max_cycles(phase: str, max_cycles: int) -> str:
         "[bold]Options:[/bold]\n"
         "  [cyan]1)[/cyan] Quit — abort the workflow\n"
         f"  [cyan]2)[/cyan] Retry — run another {max_cycles} review cycles\n"
-        "  [cyan]3)[/cyan] Continue — proceed without reviewer approval"
+        f"  [cyan]3)[/cyan] {continue_label}"
     )
     choice = click.prompt(
         "Choose",

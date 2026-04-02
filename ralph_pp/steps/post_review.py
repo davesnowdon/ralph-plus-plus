@@ -7,7 +7,7 @@ from pathlib import Path
 from rich.console import Console
 
 from ..config import Config, PostReviewConfig
-from ..tools import make_tool
+from ..tools import make_tool, make_tool_with_permissions
 from .prd import MaxCyclesAbort, prompt_max_cycles
 
 console = Console()
@@ -28,7 +28,12 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
 
     console.print("[bold cyan]\n── Step: Post-Run Review Loop ──[/bold cyan]")
     reviewer = make_tool(review_cfg.reviewer, config)
-    fixer = make_tool(review_cfg.fixer, config)
+    if config.orchestrated.auto_allow_test_commands and config.orchestrated.test_commands:
+        fixer = make_tool_with_permissions(
+            review_cfg.fixer, config, config.orchestrated.test_commands
+        )
+    else:
+        fixer = make_tool(review_cfg.fixer, config)
 
     prd_json = worktree_path / "scripts" / "ralph" / "prd.json"
 
@@ -80,11 +85,15 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
                     f"{fix_result.output[:200]}"
                 )
 
-        action = prompt_max_cycles("Post-run", review_cfg.max_cycles)
+        action = prompt_max_cycles(
+            "Post-run",
+            review_cfg.max_cycles,
+            continue_label="Accept — finish without reviewer approval",
+        )
         if action == "quit":
             raise MaxCyclesAbort
         if action == "continue":
-            console.print("[yellow]Continuing without reviewer approval[/yellow]")
+            console.print("[yellow]Accepting implementation without reviewer approval[/yellow]")
             return
         # action == "retry" → loop again
         console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")
