@@ -5,12 +5,42 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import click
 from rich.console import Console
 
 from ..config import Config, PrdReviewConfig
 from ..tools import make_tool
 
 console = Console()
+
+
+class MaxCyclesAbort(SystemExit):
+    """Raised when the user chooses to quit after max review cycles."""
+
+    def __init__(self) -> None:
+        super().__init__("Review aborted by user after max cycles reached")
+
+
+def prompt_max_cycles(phase: str, max_cycles: int) -> str:
+    """Prompt the user for action when max review cycles are exhausted.
+
+    Returns one of: "quit", "retry", "continue".
+    """
+    console.print(
+        f"\n[yellow]⚠ {phase} review: max cycles ({max_cycles}) reached without LGTM[/yellow]"
+    )
+    console.print(
+        "[bold]Options:[/bold]\n"
+        "  [cyan]1)[/cyan] Quit — abort the workflow\n"
+        f"  [cyan]2)[/cyan] Retry — run another {max_cycles} review cycles\n"
+        "  [cyan]3)[/cyan] Continue — proceed without reviewer approval"
+    )
+    choice = click.prompt(
+        "Choose",
+        type=click.Choice(["1", "2", "3"]),
+        default="3",
+    )
+    return {"1": "quit", "2": "retry", "3": "continue"}[choice]
 
 
 def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
@@ -41,6 +71,9 @@ def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
 def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None:
     """
     Iteratively review and fix the text PRD until LGTM or max_cycles reached.
+
+    When *max_cycles* is exhausted without LGTM the user is prompted to choose:
+    quit, retry another batch of cycles, or continue anyway.
     """
     review_cfg: PrdReviewConfig = config.prd_review
     if not review_cfg.enabled:
@@ -51,33 +84,61 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
     reviewer = make_tool(review_cfg.reviewer, config)
     fixer = make_tool(review_cfg.fixer, config)
 
-    for cycle in range(1, review_cfg.max_cycles + 1):
-        console.print(f"[bold]PRD review cycle {cycle}/{review_cfg.max_cycles}[/bold]")
-
-        review_prompt = review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_file))
-        result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
-        if not result.success:
-            raise RuntimeError(
-                f"PRD reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+    total_cycles = 0
+    previous_findings: str = ""
+    while True:
+        for cycle in range(1, review_cfg.max_cycles + 1):
+            total_cycles += 1
+            console.print(
+                f"[bold]PRD review cycle {total_cycles} "
+                f"({cycle}/{review_cfg.max_cycles} this batch)[/bold]"
             )
 
-        if result.is_lgtm:
-            console.print("[green]✓ PRD review passed (LGTM)[/green]")
+            if previous_findings:
+                context = (
+                    "\nThe previous review cycle found these issues (which have since "
+                    "been addressed by a fix pass). Focus on whether the fixes are "
+                    "adequate and whether any NEW issues remain. Do not re-raise issues "
+                    "that have been resolved:\n\n"
+                    f"{previous_findings}\n"
+                )
+            else:
+                context = ""
+
+            review_prompt = review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_file)).replace(
+                "{previous_findings}", context
+            )
+            result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
+            if not result.success:
+                raise RuntimeError(
+                    f"PRD reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+                )
+
+            if result.is_lgtm:
+                console.print("[green]✓ PRD review passed (LGTM)[/green]")
+                return
+
+            previous_findings = result.output
+            console.print(
+                f"[yellow]Issues found in cycle {total_cycles} — running fix pass...[/yellow]"
+            )
+            fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_file)).replace(
+                "{findings}", result.output
+            )
+            fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
+            if not fix_result.success:
+                raise RuntimeError(
+                    f"PRD fixer failed (exit {fix_result.exit_code}): {fix_result.output[:200]}"
+                )
+
+        action = prompt_max_cycles("PRD", review_cfg.max_cycles)
+        if action == "quit":
+            raise MaxCyclesAbort
+        if action == "continue":
+            console.print("[yellow]Continuing without reviewer approval[/yellow]")
             return
-
-        console.print(f"[yellow]Issues found in cycle {cycle} — running fix pass...[/yellow]")
-        fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_file)).replace(
-            "{findings}", result.output
-        )
-        fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
-        if not fix_result.success:
-            raise RuntimeError(
-                f"PRD fixer failed (exit {fix_result.exit_code}): {fix_result.output[:200]}"
-            )
-
-    console.print(
-        f"[yellow]⚠ PRD review: max cycles ({review_cfg.max_cycles}) reached — continuing[/yellow]"
-    )
+        # action == "retry" → loop again
+        console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")
 
 
 def convert_prd_to_json(prd_file: Path, worktree_path: Path, config: Config) -> Path:

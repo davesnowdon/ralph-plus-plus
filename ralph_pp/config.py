@@ -24,9 +24,13 @@ Evaluate whether it is:
 - implementable as a sequence of small independent user stories
 - testable with concrete acceptance criteria
 - explicit about constraints, edge cases, and non-goals where relevant
-
+{previous_findings}
 If the PRD is fully satisfactory, output exactly:
 LGTM
+
+If only minor issues remain (nits, style, non-blocking suggestions), output:
+LGTM
+Then list the minor observations below for informational purposes.
 
 Otherwise, output a numbered list of issues.
 
@@ -69,9 +73,13 @@ Check for:
 - obvious design or contract violations
 - missing or inadequate tests
 - mismatches between the implementation and the PRD
-
+{previous_findings}
 If everything looks correct, output exactly:
 LGTM
+
+If only minor issues remain (nits, style, non-blocking suggestions), output:
+LGTM
+Then list the minor observations below for informational purposes.
 
 Otherwise, output a numbered list of findings.
 
