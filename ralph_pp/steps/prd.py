@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import click
@@ -47,19 +48,30 @@ def prompt_max_cycles(
     return {"1": "quit", "2": "retry", "3": "continue"}[choice]
 
 
+def _feature_to_slug(feature: str) -> str:
+    """Convert a feature description to a kebab-case slug for filenames."""
+    slug = feature.lower()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"[\s_]+", "-", slug).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug
+
+
 def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
     """
     Invoke the Claude /prd skill to generate a text PRD.
     Returns the path to the generated PRD markdown file.
     """
     console.print("[bold cyan]\n── Step: Generate PRD ──[/bold cyan]")
+    slug = _feature_to_slug(feature)
+    prd_filename = f"prd-{slug}.md"
     tool = make_tool(config.prd_tool, config)
     prompt = (
         f"Create a PRD for the following feature: {feature}\n\n"
         "You have the /prd skill available. Use it to generate a detailed Product "
         "Requirements Document with goals, user stories, acceptance criteria, "
         "non-goals, and technical considerations.\n\n"
-        "Save the PRD to tasks/prd.md"
+        f"Save the PRD to tasks/{prd_filename}"
     )
     tool_cfg = config.get_tool(config.prd_tool)
     if tool_cfg.interactive:
@@ -73,7 +85,7 @@ def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
     if not result.success:
         raise RuntimeError(f"PRD generation failed (exit {result.exit_code})")
 
-    prd_file = worktree_path / "tasks" / "prd.md"
+    prd_file = worktree_path / "tasks" / prd_filename
     if not prd_file.exists():
         raise RuntimeError(f"PRD generation succeeded (exit 0) but {prd_file} was not created")
     console.print(f"[green]✓ PRD generated:[/green] {prd_file}")
