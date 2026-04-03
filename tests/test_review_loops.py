@@ -390,3 +390,47 @@ class TestPostReviewFixer:
                 post_review_loop(tmp_path, config)
 
         mock_make_augmented.assert_not_called()
+
+
+class TestPostReviewTestCommandsGuidance:
+    """Post-run reviewer prompt includes test command guidance when configured."""
+
+    def test_post_reviewer_prompt_includes_test_commands(self, tmp_path):
+        from ralph_pp.config import OrchestratedConfig
+
+        config = _make_config(
+            post_review=PostReviewConfig(
+                reviewer="codex",
+                fixer="claude",
+                max_cycles=1,
+            ),
+        )
+        config.orchestrated = OrchestratedConfig(test_commands=["hatch run ci"])
+
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"stories": []}')
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_aug,
+            patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: minor\nfoo")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+            mock_make_aug.return_value = fixer_mock
+
+            with pytest.raises(MaxCyclesAbort):
+                post_review_loop(tmp_path, config)
+
+        # Check the reviewer was called with test commands guidance
+        prompt = reviewer_mock.run.call_args[1].get(
+            "prompt", reviewer_mock.run.call_args[0][0] if reviewer_mock.run.call_args[0] else ""
+        )
+        assert "hatch run ci" in prompt
+        assert "Do NOT run bare pytest" in prompt

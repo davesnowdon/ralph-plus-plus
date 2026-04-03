@@ -6,7 +6,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ..config import Config, PostReviewConfig
+from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
 from ..tools import make_tool, make_tool_with_permissions
 from .prd import MaxCyclesAbort, prompt_max_cycles
 
@@ -58,8 +58,17 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
             else:
                 context = ""
 
-            review_prompt = review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_json)).replace(
-                "{previous_findings}", context
+            test_cmds = config.orchestrated.test_commands
+            if test_cmds:
+                cmd_list = "\n".join(f"  $ {cmd}" for cmd in test_cmds)
+                guidance = TEST_COMMANDS_GUIDANCE.format(commands=cmd_list)
+            else:
+                guidance = ""
+
+            review_prompt = (
+                review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_json))
+                .replace("{previous_findings}", context)
+                .replace("{test_commands_guidance}", guidance)
             )
             result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
             if not result.success:

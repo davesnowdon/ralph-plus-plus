@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 
 # ── default prompt constants ────────────────────────────────────────
 
+TEST_COMMANDS_GUIDANCE = """
+IMPORTANT: This project uses specific CI commands for testing and linting.
+Always use these commands instead of running tools directly:
+{commands}
+Do NOT run bare pytest, mypy, ruff, or other tools outside these commands —
+the project may require specific virtual environments or configurations."""
+
 _PRD_REVIEWER_PROMPT = """\
 Read the PRD at {prd_file}.
 
@@ -91,7 +98,8 @@ For each finding include:
 - recommended fix: the smallest reasonable corrective action
 
 Be specific. Do not give vague style feedback unless it affects
-correctness or maintainability materially."""
+correctness or maintainability materially.
+{test_commands_guidance}"""
 
 _POST_FIXER_PROMPT = """\
 The following issues were found in the final implementation against {prd_file}:
@@ -139,7 +147,8 @@ For each finding include:
 - evidence: what in the diff or code supports the finding
 - recommended fix: the smallest reasonable corrective action
 
-Only report findings that materially affect correctness, completeness, or reliability."""
+Only report findings that materially affect correctness, completeness, or reliability.
+{test_commands_guidance}"""
 
 _ORCHESTRATED_FIX_PROMPT = """\
 The following issues were found in the latest code changes against {prd_file}:
@@ -213,6 +222,7 @@ class OrchestratedConfig:
     run_tests_between_steps: bool = False
     test_commands: list[str] = field(default_factory=lambda: list[str]())
     backout_on_failure: bool = True
+    backout_severity_threshold: str = "major"  # minor | major | critical
     auto_allow_test_commands: bool = True
     review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
     fix_prompt: str = _ORCHESTRATED_FIX_PROMPT
@@ -516,6 +526,9 @@ def _build_config(data: dict[str, Any]) -> Config:
                 o.get("backout_on_failure", defaults.backout_on_failure),
                 defaults.backout_on_failure,
             ),
+            backout_severity_threshold=o.get(
+                "backout_severity_threshold", defaults.backout_severity_threshold
+            ),
             auto_allow_test_commands=_parse_bool(
                 o.get("auto_allow_test_commands", defaults.auto_allow_test_commands),
                 defaults.auto_allow_test_commands,
@@ -595,6 +608,13 @@ def validate_config(cfg: Config) -> None:
             )
         if review_cfg.fixer not in cfg.tools:
             errors.append(f"{stage_name}.fixer={review_cfg.fixer!r} not in tools {list(cfg.tools)}")
+
+    valid_severities = {"minor", "major", "critical"}
+    if cfg.orchestrated.backout_severity_threshold not in valid_severities:
+        errors.append(
+            f"orchestrated.backout_severity_threshold="
+            f"{cfg.orchestrated.backout_severity_threshold!r} not in {valid_severities}"
+        )
 
     if not isinstance(cfg.orchestrated.test_commands, list):
         errors.append(

@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
 
-from ..config import Config, OrchestratedConfig
+from ..config import TEST_COMMANDS_GUIDANCE, Config, OrchestratedConfig
 from ..sandbox import resolve_sandbox_dir
 from ..tools import make_tool
+from ..tools.base import parse_max_severity, severity_at_or_above
 
 console = Console()
 
@@ -140,6 +142,30 @@ def _render_prompt(template: str, **kwargs: str) -> str:
     return result
 
 
+def _test_commands_guidance(orch: OrchestratedConfig) -> str:
+    """Build test-command guidance block for reviewer prompts, or empty string."""
+    if not orch.test_commands:
+        return ""
+    cmd_list = "\n".join(f"  $ {cmd}" for cmd in orch.test_commands)
+    return TEST_COMMANDS_GUIDANCE.format(commands=cmd_list)
+
+
+_RETRY_HEADER = """\
+⚠ RETRY {attempt}/{max_attempts}
+Your previous attempt was REJECTED by the reviewer.
+The following findings MUST be resolved. Failure to address
+these specific issues will result in another rejection:
+
+"""
+
+
+def _wrap_retry_findings(findings: str, attempt: int, max_attempts: int) -> str:
+    """Prepend a structured header to findings on retry attempts."""
+    if attempt <= 1 or not findings:
+        return findings
+    return _RETRY_HEADER.format(attempt=attempt, max_attempts=max_attempts) + findings
+
+
 def _get_diff(worktree_path: Path, from_sha: str) -> str:
     result = subprocess.run(
         ["git", "diff", from_sha],
@@ -240,14 +266,24 @@ def _setup_worktree_files(worktree_path: Path) -> None:
         progress.write_text("# Ralph Progress Log\nStarted: orchestrated mode\n---\n")
 
 
+@dataclass
+class ReviewResult:
+    """Structured result from a review iteration."""
+
+    passed: bool
+    findings: str
+    max_severity: str | None  # None when LGTM or unparseable
+    minor_only: bool  # True when all findings are minor (or LGTM)
+
+
 def _review_iteration(
     iteration: int,
     diff: str,
     worktree_path: Path,
     config: Config,
     previous_findings: str = "",
-) -> tuple[bool, str]:
-    """Run reviewer on the iteration diff. Returns (passed, findings)."""
+) -> ReviewResult:
+    """Run reviewer on the iteration diff."""
     orch = config.orchestrated
     reviewer = make_tool(orch.reviewer, config)
     prd_file = str(worktree_path / "scripts" / "ralph" / "prd.json")
@@ -264,7 +300,11 @@ def _review_iteration(
         context = ""
 
     review_prompt = _render_prompt(
-        orch.review_prompt, diff=diff, prd_file=prd_file, previous_findings=context
+        orch.review_prompt,
+        diff=diff,
+        prd_file=prd_file,
+        previous_findings=context,
+        test_commands_guidance=_test_commands_guidance(orch),
     )
     result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
     if not result.success:
@@ -274,10 +314,26 @@ def _review_iteration(
 
     if result.is_lgtm:
         console.print(f"  [green]✓ Review passed (LGTM) — iteration {iteration}[/green]")
-        return True, result.output
+        return ReviewResult(passed=True, findings=result.output, max_severity=None, minor_only=True)
+
+    # Parse severity from reviewer output
+    max_sev = parse_max_severity(result.output)
+    threshold = orch.backout_severity_threshold
+
+    if max_sev is not None and not severity_at_or_above(max_sev, threshold):
+        # All findings are below the backout threshold — accept with warnings
+        console.print(
+            f"  [yellow]Review found only {max_sev} issues — "
+            f"accepting iteration {iteration} with warnings[/yellow]"
+        )
+        return ReviewResult(
+            passed=True, findings=result.output, max_severity=max_sev, minor_only=True
+        )
 
     console.print(f"  [yellow]Issues found in iteration {iteration}[/yellow]")
-    return False, result.output
+    return ReviewResult(
+        passed=False, findings=result.output, max_severity=max_sev, minor_only=False
+    )
 
 
 def _run_fixer_in_sandbox(
@@ -358,7 +414,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     iteration=str(iteration),
                     prd_file=str(prd_json),
                     progress=progress_text,
-                    review_findings=last_findings,
+                    review_findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
                 )
                 iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
                 iter_prompt.write_text(prompt_text)
@@ -415,20 +471,21 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
             # Review changes
             diff = _get_diff(worktree_path, pre_sha)
-            passed, findings = _review_iteration(
+            review = _review_iteration(
                 iteration, diff, worktree_path, config, previous_findings=last_findings
             )
-            last_findings = findings
+            last_findings = review.findings
 
-            if passed and not tests_failed:
+            if review.passed and not tests_failed:
+                if review.minor_only and review.max_severity is not None:
+                    console.print("  [dim]Minor findings carried forward[/dim]")
                 iteration_passed = True
                 break
-            elif tests_failed and passed:
+            elif tests_failed and review.passed:
                 console.print(
                     "  [yellow]Reviewer approved but tests failed — not accepting[/yellow]"
                 )
-                passed = False
-                last_findings = "Tests failed. " + findings
+                last_findings = "Tests failed. " + review.findings
 
             # Handle review failure
             if orch.backout_on_failure:
@@ -446,7 +503,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     console.print(
                         f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]"
                     )
-                    fixer_result = _run_fixer_in_sandbox(findings, worktree_path, config)
+                    fixer_result = _run_fixer_in_sandbox(review.findings, worktree_path, config)
                     if fixer_result.returncode != 0:
                         console.print(
                             f"  [red]✗ Fixer process failed (exit {fixer_result.returncode})[/red]"
@@ -468,11 +525,11 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
                     # Re-review after fix
                     diff = _get_diff(worktree_path, pre_sha)
-                    passed, findings = _review_iteration(
-                        iteration, diff, worktree_path, config, previous_findings=findings
+                    review = _review_iteration(
+                        iteration, diff, worktree_path, config, previous_findings=review.findings
                     )
-                    last_findings = findings
-                    if passed:
+                    last_findings = review.findings
+                    if review.passed:
                         iteration_passed = True
                         break
 

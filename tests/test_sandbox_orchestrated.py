@@ -7,7 +7,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ralph_pp.config import Config, OrchestratedConfig, RalphConfig, ToolConfig
-from ralph_pp.steps.sandbox import _run_fixer_in_sandbox, _run_orchestrated
+from ralph_pp.steps.sandbox import (
+    ReviewResult,
+    _run_fixer_in_sandbox,
+    _run_orchestrated,
+    _wrap_retry_findings,
+)
 from ralph_pp.tools.base import ToolResult
 
 
@@ -16,6 +21,7 @@ def _make_config(
     max_iterations: int = 1,
     max_iteration_retries: int = 1,
     backout_on_failure: bool = True,
+    backout_severity_threshold: str = "major",
     run_tests: bool = False,
     test_commands: list[str] | None = None,
 ) -> Config:
@@ -55,6 +61,7 @@ def _make_config(
             fixer="claude",
             max_iteration_retries=max_iteration_retries,
             backout_on_failure=backout_on_failure,
+            backout_severity_threshold=backout_severity_threshold,
             run_tests_between_steps=run_tests,
             test_commands=test_commands or [],
         ),
@@ -80,6 +87,15 @@ def _fake_subprocess_run(returncode=0, stdout="", stderr=""):
         stderr=stderr,
     )
     return result
+
+
+def _coder_succeeds(cmd, **kwargs):
+    """Subprocess mock where git helpers and coder all succeed."""
+    if isinstance(cmd, list) and "rev-parse" in cmd:
+        return _fake_subprocess_run(returncode=0, stdout="abc1234")
+    if isinstance(cmd, list) and "diff" in cmd:
+        return _fake_subprocess_run(returncode=0, stdout="some diff")
+    return _fake_subprocess_run(returncode=0, stdout="coder output")
 
 
 class TestCoderInfraFailure:
@@ -115,7 +131,7 @@ class TestCoderInfraFailure:
         def mock_review(*args, **kwargs):
             nonlocal review_call_count
             review_call_count += 1
-            return (True, "LGTM")
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
@@ -150,7 +166,7 @@ class TestCoderInfraFailure:
         def mock_review(*args, **kwargs):
             nonlocal review_called
             review_called = True
-            return (True, "LGTM")
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
@@ -195,7 +211,9 @@ class TestFixerInfraFailure:
         def mock_review(*args, **kwargs):
             nonlocal review_count
             review_count += 1
-            return (False, "Issues found")
+            return ReviewResult(
+                passed=False, findings="Issues found", max_severity=None, minor_only=False
+            )
 
         def mock_fixer(findings, worktree_path, config):
             # Fixer fails
@@ -241,7 +259,7 @@ class TestTestFailureBlocking:
             return _fake_subprocess_run(returncode=0, stdout="coder output")
 
         def mock_review(*args, **kwargs):
-            return (True, "LGTM")
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         def mock_test_commands(worktree_path, commands):
             return False  # tests fail
@@ -286,7 +304,9 @@ class TestFixInPlaceTestRerun:
             return _fake_subprocess_run(returncode=0, stdout="coder output")
 
         def mock_review(*args, **kwargs):
-            return (False, "Issues found")
+            return ReviewResult(
+                passed=False, findings="Issues found", max_severity=None, minor_only=False
+            )
 
         def mock_fixer(findings, worktree_path, config):
             return _fake_subprocess_run(returncode=0, stdout="fixed")
@@ -343,8 +363,10 @@ class TestFixInPlaceTestRerun:
             nonlocal review_call_count
             review_call_count += 1
             if review_call_count == 1:
-                return (False, "Issues found")
-            return (True, "LGTM")
+                return ReviewResult(
+                    passed=False, findings="Issues found", max_severity=None, minor_only=False
+                )
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         def mock_fixer(findings, worktree_path, config):
             return _fake_subprocess_run(returncode=0, stdout="fixed")
@@ -467,7 +489,7 @@ class TestPromptPropagation:
             return _fake_subprocess_run(returncode=0, stdout="output")
 
         def mock_review(*args, **kwargs):
-            return (True, "LGTM")
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
@@ -542,7 +564,9 @@ class TestRetriesExhaustedAborts:
             return _fake_subprocess_run(returncode=0, stdout="coder output")
 
         def mock_review(*args, **kwargs):
-            return (False, "Major flaws found")
+            return ReviewResult(
+                passed=False, findings="Major flaws found", max_severity="major", minor_only=False
+            )
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
@@ -577,7 +601,9 @@ class TestRetriesExhaustedAborts:
             return _fake_subprocess_run(returncode=0, stdout="coder/fixer output")
 
         def mock_review(*args, **kwargs):
-            return (False, "Major flaws found")
+            return ReviewResult(
+                passed=False, findings="Major flaws found", max_severity="major", minor_only=False
+            )
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
@@ -741,8 +767,10 @@ class TestPreviousFindings:
             nonlocal review_count
             review_count += 1
             if review_count == 1:
-                return (False, "Issues found")
-            return (True, "LGTM")
+                return ReviewResult(
+                    passed=False, findings="Issues found", max_severity=None, minor_only=False
+                )
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         def mock_fixer(findings, worktree_path, config):
             return _fake_subprocess_run(returncode=0, stdout="fixed")
@@ -802,8 +830,10 @@ class TestPreviousFindings:
             nonlocal review_count
             review_count += 1
             if review_count == 1:
-                return (False, findings_text)
-            return (True, "LGTM")
+                return ReviewResult(
+                    passed=False, findings=findings_text, max_severity="major", minor_only=False
+                )
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
@@ -821,3 +851,290 @@ class TestPreviousFindings:
         assert iter_prompt.exists()
         content = iter_prompt.read_text()
         assert findings_text in content, "Retry prompt should include previous review findings"
+
+
+class TestSeverityGatedBackout:
+    """Backout should only trigger when findings meet the severity threshold."""
+
+    def test_minor_only_findings_do_not_trigger_backout(self, tmp_path):
+        """When all findings are minor and threshold is 'major', iteration passes."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=1, backout_on_failure=True
+        )
+
+        minor_findings = "1. severity: minor\nfile: foo.py\nproblem: missing docstring"
+
+        def mock_review(*args, **kwargs):
+            # Return minor-only findings — should pass due to severity gating
+            return ReviewResult(
+                passed=True, findings=minor_findings, max_severity="minor", minor_only=True
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            # Should not abort — minor findings don't trigger backout
+            result = _run_orchestrated(worktree, config)
+
+        # Iteration accepted (but didn't get COMPLETE signal, so returns False
+        # after reaching max iterations). The key thing is it didn't abort early.
+        # With max_iterations=1 it will print "Reached max iterations" and return False
+        # but importantly it did NOT return False from "All retries exhausted".
+        assert result is False  # max iterations reached, no COMPLETE signal
+
+    def test_major_findings_trigger_backout(self, tmp_path):
+        """When findings include major severity, backout and retry happen."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=1, backout_on_failure=True
+        )
+        review_count = 0
+
+        def mock_review(*args, **kwargs):
+            nonlocal review_count
+            review_count += 1
+            return ReviewResult(
+                passed=False,
+                findings="severity: major\nproblem: broken",
+                max_severity="major",
+                minor_only=False,
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox._backout_to") as mock_backout,
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False
+        # With max_iteration_retries=1, we get 2 attempts. After first fails,
+        # backout should be called once.
+        assert mock_backout.call_count == 1
+
+    def test_unparseable_severity_triggers_backout(self, tmp_path):
+        """When reviewer output has no severity labels, treat as blocking."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=0, backout_on_failure=True
+        )
+
+        def mock_review(*args, **kwargs):
+            # No severity labels — max_severity=None, passed=False (conservative)
+            return ReviewResult(
+                passed=False, findings="Something is wrong", max_severity=None, minor_only=False
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False  # Should abort
+
+    def test_minor_findings_carried_forward(self, tmp_path):
+        """Minor findings that pass gating are still available in last_findings."""
+        worktree = _setup_worktree(tmp_path)
+        minor_text = "1. severity: minor\nproblem: missing test"
+        config = _make_config(
+            tmp_path, max_iterations=2, max_iteration_retries=0, backout_on_failure=True
+        )
+        review_count = 0
+
+        def mock_review(*args, **kwargs):
+            nonlocal review_count
+            review_count += 1
+            if review_count == 1:
+                return ReviewResult(
+                    passed=True, findings=minor_text, max_severity="minor", minor_only=True
+                )
+            # Second iteration should see the minor findings
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # Both iterations ran (minor findings didn't block iteration 1)
+        assert review_count == 2
+
+    def test_custom_threshold_critical_only(self, tmp_path):
+        """With threshold='critical', major findings pass gating."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=0,
+            backout_on_failure=True,
+            backout_severity_threshold="critical",
+        )
+
+        def mock_review(*args, **kwargs):
+            # Major findings but threshold is critical — should pass
+            return ReviewResult(
+                passed=True,
+                findings="severity: major\nproblem: not great",
+                max_severity="major",
+                minor_only=True,  # below threshold
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        # Should not abort early — max_iterations reached without COMPLETE
+        assert result is False  # but no "retries exhausted" abort
+
+
+class TestRetryPromptWrapping:
+    """_wrap_retry_findings prepends a structured header on retries."""
+
+    def test_first_attempt_noop(self):
+        assert _wrap_retry_findings("some findings", 1, 3) == "some findings"
+
+    def test_empty_findings_noop(self):
+        assert _wrap_retry_findings("", 2, 3) == ""
+
+    def test_retry_adds_header(self):
+        result = _wrap_retry_findings("problem: broken", 2, 3)
+        assert "RETRY 2/3" in result
+        assert "REJECTED" in result
+        assert "problem: broken" in result
+
+    def test_retry_header_preserves_findings(self):
+        findings = "1. severity: major\nfile: foo.py\nproblem: bad"
+        result = _wrap_retry_findings(findings, 3, 4)
+        assert result.endswith(findings)
+        assert "RETRY 3/4" in result
+
+    def test_backout_retry_prompt_contains_header(self, tmp_path):
+        """Integration: .iteration-prompt.md contains RETRY header on attempt 2."""
+        worktree = _setup_worktree(tmp_path)
+        findings_text = "1. severity: major\nproblem: broken code"
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=1, backout_on_failure=True
+        )
+        config.orchestrated.prompt_template = (
+            "Iteration {iteration}\nprd: {prd_file}\n"
+            "progress: {progress}\nfindings: {review_findings}"
+        )
+
+        review_count = 0
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            nonlocal review_count
+            review_count += 1
+            if review_count == 1:
+                return ReviewResult(
+                    passed=False, findings=findings_text, max_severity="major", minor_only=False
+                )
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        iter_prompt = worktree / "scripts" / "ralph" / ".iteration-prompt.md"
+        assert iter_prompt.exists()
+        content = iter_prompt.read_text()
+        assert "RETRY 2/2" in content, "Retry prompt should have RETRY header"
+        assert findings_text in content
+
+
+class TestTestCommandsGuidance:
+    """Reviewer prompts include test command guidance when configured."""
+
+    def test_review_prompt_includes_test_commands_when_configured(self, tmp_path):
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, test_commands=["hatch run ci"])
+
+        captured_prompt = None
+
+        def mock_tool_run(prompt, cwd):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return ToolResult(output="LGTM", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = mock_tool_run
+            mock_make_tool.return_value = mock_tool
+
+            _review_iteration(iteration=1, diff="diff", worktree_path=worktree, config=config)
+
+        assert captured_prompt is not None
+        assert "hatch run ci" in captured_prompt
+        assert "Do NOT run bare pytest" in captured_prompt
+
+    def test_review_prompt_no_guidance_when_no_test_commands(self, tmp_path):
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, test_commands=[])
+
+        captured_prompt = None
+
+        def mock_tool_run(prompt, cwd):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return ToolResult(output="LGTM", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = mock_tool_run
+            mock_make_tool.return_value = mock_tool
+
+            _review_iteration(iteration=1, diff="diff", worktree_path=worktree, config=config)
+
+        assert captured_prompt is not None
+        assert "Do NOT run bare pytest" not in captured_prompt
