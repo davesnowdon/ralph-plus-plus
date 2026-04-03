@@ -768,3 +768,56 @@ class TestPreviousFindings:
         # Should have committed after coder and after fixer
         assert any("coder" in m for m in commit_calls), "Should commit after coder"
         assert any("fixer" in m for m in commit_calls), "Should commit after fixer"
+
+    def test_backout_retry_gets_review_findings(self, tmp_path):
+        """In backout mode, the coder prompt on retry includes previous review findings."""
+        worktree = _setup_worktree(tmp_path)
+        progress_file = worktree / "scripts" / "ralph" / "progress.txt"
+        progress_file.write_text("# Progress\n")
+
+        template = (
+            "Iteration: {iteration}\n"
+            "PRD: {prd_file}\n"
+            "Progress:\n{progress}\n"
+            "Previous findings:\n{review_findings}\n"
+        )
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=1, backout_on_failure=True
+        )
+        config.orchestrated.prompt_template = template
+
+        review_count = 0
+        findings_text = "MAJOR: query() not removed from InMemoryStore"
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            nonlocal review_count
+            review_count += 1
+            if review_count == 1:
+                return (False, findings_text)
+            return (True, "LGTM")
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # The prompt file should contain the review findings from the first attempt
+        iter_prompt = worktree / "scripts" / "ralph" / ".iteration-prompt.md"
+        assert iter_prompt.exists()
+        content = iter_prompt.read_text()
+        assert findings_text in content, "Retry prompt should include previous review findings"

@@ -338,22 +338,6 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
         pre_sha = _get_head_sha(worktree_path)
 
-        # Optionally write per-iteration prompt
-        extra_env: dict[str, str] = {}
-        if orch.prompt_template is not None:
-            progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
-            progress_text = progress_file.read_text() if progress_file.exists() else ""
-            prompt_text = _render_prompt(
-                orch.prompt_template,
-                iteration=str(iteration),
-                prd_file=str(prd_json),
-                progress=progress_text,
-                review_findings=last_findings,
-            )
-            iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
-            iter_prompt.write_text(prompt_text)
-            extra_env["RALPH_PROMPT_FILE"] = str(Path("scripts/ralph/.iteration-prompt.md"))
-
         # Run coding step (with retries for backout mode)
         max_attempts = orch.max_iteration_retries + 1 if orch.backout_on_failure else 1
 
@@ -363,6 +347,22 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 console.print(
                     f"  [yellow]Retry {attempt}/{max_attempts} for iteration {iteration}[/yellow]"
                 )
+
+            # Write per-attempt prompt (inside loop so retries get latest findings)
+            extra_env: dict[str, str] = {}
+            if orch.prompt_template is not None:
+                progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+                progress_text = progress_file.read_text() if progress_file.exists() else ""
+                prompt_text = _render_prompt(
+                    orch.prompt_template,
+                    iteration=str(iteration),
+                    prd_file=str(prd_json),
+                    progress=progress_text,
+                    review_findings=last_findings,
+                )
+                iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
+                iter_prompt.write_text(prompt_text)
+                extra_env["RALPH_PROMPT_FILE"] = str(Path("scripts/ralph/.iteration-prompt.md"))
 
             # Run coder in sandbox
             cmd = _build_sandbox_command(
