@@ -626,9 +626,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     console.print("  [yellow]Tests failed — treating as review failure[/yellow]")
                     tests_failed = True
                     if orch.backout_on_failure and attempt < max_attempts:
-                        _backout_to(
-                            worktree_path, pre_sha, restore_files=restore_files
-                        )
+                        _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                         continue
 
             # Review changes — scope to newly-completed stories only
