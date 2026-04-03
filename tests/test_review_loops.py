@@ -502,3 +502,93 @@ class TestPostReviewTestCommandsGuidance:
         )
         assert "hatch run ci" in prompt
         assert "Do NOT run bare pytest" in prompt
+
+
+class TestPostReviewDiff:
+    """Post-run reviewer prompt includes diff when .base-sha is available."""
+
+    def test_diff_included_when_base_sha_exists(self, tmp_path):
+        from ralph_pp.config import OrchestratedConfig
+
+        config = _make_config(
+            post_review=PostReviewConfig(
+                reviewer="codex",
+                fixer="claude",
+                max_cycles=1,
+            ),
+        )
+        config.orchestrated = OrchestratedConfig()
+
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        # Write a .base-sha file
+        base_sha_file = tmp_path / "scripts" / "ralph" / ".base-sha"
+        base_sha_file.write_text("abc1234")
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="def5678"),
+            patch(
+                "ralph_pp.steps.post_review.get_diff",
+                return_value="diff --git a/foo b/foo\n+bar",
+            ),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: minor\nfoo")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            with pytest.raises(MaxCyclesAbort):
+                post_review_loop(tmp_path, config)
+
+        prompt = reviewer_mock.run.call_args[1].get(
+            "prompt", reviewer_mock.run.call_args[0][0] if reviewer_mock.run.call_args[0] else ""
+        )
+        assert "diff --git a/foo b/foo" in prompt
+        assert "all changes since run start" in prompt
+
+    def test_no_diff_when_base_sha_missing(self, tmp_path):
+        from ralph_pp.config import OrchestratedConfig
+
+        config = _make_config(
+            post_review=PostReviewConfig(
+                reviewer="codex",
+                fixer="claude",
+                max_cycles=1,
+            ),
+        )
+        config.orchestrated = OrchestratedConfig()
+
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        # No .base-sha file
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="def5678"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: minor\nfoo")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            with pytest.raises(MaxCyclesAbort):
+                post_review_loop(tmp_path, config)
+
+        prompt = reviewer_mock.run.call_args[1].get(
+            "prompt", reviewer_mock.run.call_args[0][0] if reviewer_mock.run.call_args[0] else ""
+        )
+        assert "all changes since run start" not in prompt

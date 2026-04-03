@@ -75,6 +75,7 @@ Do NOT evaluate against stories that are not listed here.
 
 {stories_under_review}
 {incomplete_stories_note}
+{diff}
 {previous_findings}
 Review whether the code fully satisfies every listed story and its acceptance criteria.
 
@@ -166,7 +167,8 @@ For each finding include:
 - recommended fix: the smallest reasonable corrective action
 
 Only report findings that materially affect correctness, completeness, or reliability.
-{test_commands_guidance}"""
+{test_commands_guidance}
+{test_results}"""
 
 _ORCHESTRATED_FIX_PROMPT = """\
 The following issues were found in the latest code changes.

@@ -19,7 +19,13 @@ from ..config import TEST_COMMANDS_GUIDANCE, Config, OrchestratedConfig
 from ..sandbox import resolve_sandbox_dir
 from ..tools import make_tool
 from ..tools.base import parse_max_severity, severity_at_or_above
-from ._git import commit_if_dirty, get_diff, get_head_sha
+from ._git import (
+    commit_if_dirty,
+    format_test_results,
+    get_diff,
+    get_head_sha,
+    run_test_commands_with_output,
+)
 
 console = Console()
 
@@ -91,8 +97,20 @@ normally (another iteration will pick up the next story).
 COMPLETE_SIGNAL = "<promise>COMPLETE</promise>"
 
 
+BASE_SHA_FILE = "scripts/ralph/.base-sha"
+
+
 def run_sandbox(worktree_path: Path, config: Config) -> bool:
-    """Run the Ralph loop. Dispatches to delegated or orchestrated mode."""
+    """Run the Ralph loop. Dispatches to delegated or orchestrated mode.
+
+    Saves the pre-run HEAD SHA to ``scripts/ralph/.base-sha`` so that the
+    post-run review can diff against the starting point.
+    """
+    base_sha = get_head_sha(worktree_path)
+    base_sha_path = worktree_path / BASE_SHA_FILE
+    base_sha_path.parent.mkdir(parents=True, exist_ok=True)
+    base_sha_path.write_text(base_sha)
+
     if config.ralph.mode == "orchestrated":
         return _run_orchestrated(worktree_path, config)
     return _run_delegated(worktree_path, config)
@@ -179,17 +197,6 @@ def _backout_to(
         for path, content in restore_files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
-
-
-def _run_test_commands(worktree_path: Path, commands: list[str]) -> bool:
-    """Run test/lint commands. Returns True if all pass."""
-    for cmd in commands:
-        console.print(f"[dim]  $ {cmd}[/dim]")
-        result = subprocess.run(cmd, shell=True, cwd=worktree_path)
-        if result.returncode != 0:
-            console.print(f"[red]  ✗ Command failed: {cmd}[/red]")
-            return False
-    return True
 
 
 def _render_prompt(template: str, **kwargs: str) -> str:
@@ -315,25 +322,27 @@ def _run_delegated(worktree_path: Path, config: Config) -> bool:
 # ── Orchestrated mode ──────────────────────────────────────────────────
 
 
+def _write_coder_prompt(worktree_path: Path, findings: str = "") -> None:
+    """Write the orchestrated coder prompt, optionally with review findings."""
+    ralph_dir = worktree_path / "scripts" / "ralph"
+    ralph_dir.mkdir(parents=True, exist_ok=True)
+    prompt = _ORCHESTRATED_CODER_PROMPT
+    if findings:
+        prompt += "\n" + findings
+    (ralph_dir / "CLAUDE.md").write_text(prompt)
+
+
 def _setup_worktree_files(worktree_path: Path) -> None:
     """Ensure scripts/ralph/ has the required files for orchestrated mode.
 
     In custom-runner mode the sandbox entrypoint does not copy ralph.sh or
     CLAUDE.md, so ralph++ must set them up before the first iteration.
     """
-    ralph_dir = worktree_path / "scripts" / "ralph"
-    ralph_dir.mkdir(parents=True, exist_ok=True)
+    _write_coder_prompt(worktree_path)
 
-    # Copy upstream CLAUDE.md from the ralph-sandbox image's /opt/ralph/
-    # source — but since we're on the host, we look for it in the worktree
-    # or fall back to a reasonable default prompt.
-    # scripts/ralph/CLAUDE.md is owned by ralph++ — always write the
-    # orchestrated coder prompt so the coder gets single-story instructions.
-    claude_md = ralph_dir / "CLAUDE.md"
-    claude_md.write_text(_ORCHESTRATED_CODER_PROMPT)
-
-    progress = ralph_dir / "progress.txt"
+    progress = worktree_path / "scripts" / "ralph" / "progress.txt"
     if not progress.exists():
+        progress.parent.mkdir(parents=True, exist_ok=True)
         progress.write_text("# Ralph Progress Log\nStarted: orchestrated mode\n---\n")
 
 
@@ -355,6 +364,7 @@ def _review_iteration(
     previous_findings: str = "",
     fixer_diff: str = "",
     stories_under_review: str = "",
+    test_results: str = "",
 ) -> ReviewResult:
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
@@ -382,6 +392,7 @@ def _review_iteration(
         stories_under_review=stories_under_review,
         previous_findings=context,
         test_commands_guidance=_test_commands_guidance(orch),
+        test_results=test_results,
     )
     result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
     if not result.success:
@@ -468,11 +479,6 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
     if not prd_json.exists():
         raise FileNotFoundError(f"prd.json not found at {prd_json}")
 
-    # Save scaffold files so they survive git reset --hard during backout.
-    # _commit_if_dirty uses `git add -A` which stages these untracked files,
-    # so a hard reset to the pre-iteration SHA removes them.
-    saved_prd_json = prd_json.read_text()
-
     last_findings = ""
     consecutive_idle = 0
     prev_story_status = read_story_status(prd_json)
@@ -486,6 +492,15 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
         )
 
         pre_sha = _get_head_sha(worktree_path)
+
+        # Snapshot files that must survive git reset --hard during backout.
+        # prd.json is re-read each iteration so backout restores the current
+        # state (with previously-completed stories) rather than the initial one.
+        # .base-sha is static but gets destroyed by reset if it was staged.
+        base_sha_path = worktree_path / BASE_SHA_FILE
+        restore_files: dict[Path, str] = {prd_json: prd_json.read_text()}
+        if base_sha_path.exists():
+            restore_files[base_sha_path] = base_sha_path.read_text()
 
         # Run coding step (with retries for backout mode)
         max_attempts = orch.max_iteration_retries + 1 if orch.backout_on_failure else 1
@@ -512,6 +527,13 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
                 iter_prompt.write_text(prompt_text)
                 extra_env["RALPH_PROMPT_FILE"] = str(Path("scripts/ralph/.iteration-prompt.md"))
+            elif attempt > 1 and last_findings:
+                # Default prompt flow: append review findings to CLAUDE.md so the
+                # coder knows why its previous attempt was rejected.
+                _write_coder_prompt(
+                    worktree_path,
+                    findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
+                )
 
             # Run coder in sandbox
             cmd = _build_sandbox_command(
@@ -537,15 +559,24 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if result.returncode != 0:
                 console.print(f"  [red]✗ Coder process failed (exit {result.returncode})[/red]")
                 if orch.backout_on_failure and attempt < max_attempts:
-                    _backout_to(worktree_path, pre_sha, restore_files={prd_json: saved_prd_json})
+                    _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                     continue
                 console.print("  [red]Infra failure — skipping review[/red]")
                 break
 
-            # Check for completion signal
+            # Check for completion signal — verify against prd.json
             if COMPLETE_SIGNAL in combined_output:
-                console.print("[green]Ralph signaled COMPLETE[/green]")
-                return True
+                _commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
+                story_status = read_story_status(prd_json)
+                if all(story_status.values()):
+                    console.print("[green]Ralph signaled COMPLETE[/green]")
+                    return True
+                incomplete = [sid for sid, p in story_status.items() if not p]
+                console.print(
+                    f"[yellow]Ralph signaled COMPLETE but {len(incomplete)} stories "
+                    f"still have passes=false: {', '.join(sorted(incomplete))} — "
+                    "continuing iterations[/yellow]"
+                )
 
             # Force-commit any uncommitted coder changes
             _commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
@@ -582,16 +613,20 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
             # Run tests/linter (optional)
             tests_failed = False
+            test_results_text = ""
             if orch.run_tests_between_steps and orch.test_commands:
                 console.print("  [dim]Running test commands...[/dim]")
-                tests_ok = _run_test_commands(worktree_path, orch.test_commands)
+                tests_ok, test_output = run_test_commands_with_output(
+                    worktree_path, orch.test_commands
+                )
+                if test_output:
+                    console.print(test_output)
+                test_results_text = format_test_results(test_output, tests_ok)
                 if not tests_ok:
                     console.print("  [yellow]Tests failed — treating as review failure[/yellow]")
                     tests_failed = True
                     if orch.backout_on_failure and attempt < max_attempts:
-                        _backout_to(
-                            worktree_path, pre_sha, restore_files={prd_json: saved_prd_json}
-                        )
+                        _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                         continue
 
             # Review changes — scope to newly-completed stories only
@@ -611,6 +646,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 config,
                 previous_findings=last_findings,
                 stories_under_review=stories_text,
+                test_results=test_results_text,
             )
             last_findings = review.findings
 
@@ -629,7 +665,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if orch.backout_on_failure:
                 # PATH A: Backout and retry
                 if attempt < max_attempts:
-                    _backout_to(worktree_path, pre_sha, restore_files={prd_json: saved_prd_json})
+                    _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                 else:
                     console.print(
                         f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
@@ -659,9 +695,16 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     fix_diff = _get_diff(worktree_path, pre_fix_sha)
 
                     # Re-run tests after fix (if enabled)
+                    fix_test_results = ""
                     if orch.run_tests_between_steps and orch.test_commands:
                         console.print("  [dim]Re-running test commands after fix...[/dim]")
-                        if not _run_test_commands(worktree_path, orch.test_commands):
+                        fix_tests_ok, fix_test_output = run_test_commands_with_output(
+                            worktree_path, orch.test_commands
+                        )
+                        if fix_test_output:
+                            console.print(fix_test_output)
+                        fix_test_results = format_test_results(fix_test_output, fix_tests_ok)
+                        if not fix_tests_ok:
                             console.print("  [yellow]Tests still failing after fix[/yellow]")
                             continue
 
@@ -675,6 +718,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         previous_findings=review.findings,
                         fixer_diff=fix_diff,
                         stories_under_review=stories_text,
+                        test_results=fix_test_results,
                     )
                     last_findings = review.findings
                     if review.passed:

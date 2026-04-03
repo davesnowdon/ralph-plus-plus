@@ -66,6 +66,18 @@ def commit_if_dirty(worktree_path: Path, message: str) -> bool:
     return True
 
 
+def format_test_results(test_output: str, passed: bool) -> str:
+    """Format pre-run test output into a block for reviewer prompts."""
+    status_str = "PASSED" if passed else "FAILED"
+    return (
+        f"\nThe following test/CI results were obtained before this review "
+        f"({status_str}):\n\n{test_output}\n\n"
+        "Use these results as a starting point. You may re-run the configured "
+        "CI commands if you need to verify specific fixes, but do NOT run bare "
+        "pytest or other tools.\n"
+    )
+
+
 def run_test_commands_with_output(worktree_path: Path, commands: list[str]) -> tuple[bool, str]:
     """Run test/lint commands, capturing output.
 
