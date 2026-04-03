@@ -10,6 +10,7 @@ from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
 from ..tools import make_tool, make_tool_with_permissions
 from ._git import get_diff, get_head_sha, run_test_commands_with_output
 from .prd import MaxCyclesAbort, prompt_max_cycles
+from .sandbox import format_all_completed
 
 console = Console()
 
@@ -42,6 +43,16 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
         fixer = make_tool(review_cfg.fixer, config)
 
     prd_json = worktree_path / "scripts" / "ralph" / "prd.json"
+
+    # Extract completed stories for the reviewer
+    stories_text, incomplete_ids = format_all_completed(prd_json)
+    if incomplete_ids:
+        incomplete_note = (
+            f"\nNote: The following {len(incomplete_ids)} stories were not attempted "
+            f"and should NOT be reviewed: {', '.join(incomplete_ids)}\n"
+        )
+    else:
+        incomplete_note = ""
 
     total_cycles = 0
     previous_findings: str = ""
@@ -93,7 +104,8 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
                 )
 
             review_prompt = (
-                review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_json))
+                review_cfg.reviewer_prompt.replace("{stories_under_review}", stories_text)
+                .replace("{incomplete_stories_note}", incomplete_note)
                 .replace("{previous_findings}", context)
                 .replace("{test_commands_guidance}", guidance)
                 .replace("{test_results}", test_results_text)
@@ -113,9 +125,9 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
                 f"[yellow]Issues found in cycle {total_cycles} — running fix pass...[/yellow]"
             )
             pre_fix_sha = get_head_sha(worktree_path)
-            fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_json)).replace(
-                "{findings}", result.output
-            )
+            fix_prompt = review_cfg.fixer_prompt.replace(
+                "{stories_under_review}", stories_text
+            ).replace("{findings}", result.output)
             fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
             if not fix_result.success:
                 raise RuntimeError(

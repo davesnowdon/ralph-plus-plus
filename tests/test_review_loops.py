@@ -244,7 +244,7 @@ class TestPostReviewLoopToolFailures:
         config = _make_config(post_review=_review_cfg(cls=PostReviewConfig))
         prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
         prd_json.parent.mkdir(parents=True)
-        prd_json.write_text("{}")
+        prd_json.write_text('{"userStories": []}')
 
         with patch("ralph_pp.steps.post_review.make_tool") as mock_make:
             reviewer_mock = MagicMock()
@@ -263,7 +263,7 @@ class TestPostReviewLoopToolFailures:
         config = _make_config(post_review=_review_cfg(cls=PostReviewConfig))
         prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
         prd_json.parent.mkdir(parents=True)
-        prd_json.write_text("{}")
+        prd_json.write_text('{"userStories": []}')
 
         with (
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
@@ -295,7 +295,7 @@ class TestPostReviewLoopMaxCycles:
         config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=1))
         prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
         prd_json.parent.mkdir(parents=True)
-        prd_json.write_text("{}")
+        prd_json.write_text('{"userStories": []}')
 
         with (
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
@@ -326,7 +326,7 @@ class TestPostReviewLoopMaxCycles:
         config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=1))
         prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
         prd_json.parent.mkdir(parents=True)
-        prd_json.write_text("{}")
+        prd_json.write_text('{"userStories": []}')
 
         with (
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
@@ -386,7 +386,7 @@ class TestPostReviewFixer:
         )
         prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
         prd_json.parent.mkdir(parents=True)
-        prd_json.write_text("{}")
+        prd_json.write_text('{"userStories": []}')
 
         with (
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
@@ -425,7 +425,7 @@ class TestPostReviewFixer:
         )
         prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
         prd_json.parent.mkdir(parents=True)
-        prd_json.write_text("{}")
+        prd_json.write_text('{"userStories": []}')
 
         with (
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
@@ -469,7 +469,7 @@ class TestPostReviewTestCommandsGuidance:
 
         prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
         prd_json.parent.mkdir(parents=True)
-        prd_json.write_text('{"stories": []}')
+        prd_json.write_text('{"userStories": []}')
 
         with (
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,

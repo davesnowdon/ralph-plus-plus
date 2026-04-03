@@ -68,9 +68,15 @@ Requirements:
 Do not output a summary instead of making the edits. Update the PRD itself."""
 
 _POST_REVIEWER_PROMPT = """\
-Read the implementation and the requirements in {prd_file}.
+Review the implementation against ONLY the completed user stories listed below.
+Do NOT evaluate against stories that are not listed here.
 
-Review whether the code fully satisfies every required story and acceptance criterion.
+## Completed stories to review
+
+{stories_under_review}
+{incomplete_stories_note}
+{previous_findings}
+Review whether the code fully satisfies every listed story and its acceptance criteria.
 
 Check for:
 - missing functionality
@@ -79,8 +85,8 @@ Check for:
 - edge-case handling
 - obvious design or contract violations
 - missing or inadequate tests
-- mismatches between the implementation and the PRD
-{previous_findings}
+- mismatches between the implementation and the stories above
+
 If everything looks correct, output exactly:
 LGTM
 
@@ -103,7 +109,13 @@ correctness or maintainability materially.
 {test_results}"""
 
 _POST_FIXER_PROMPT = """\
-The following issues were found in the final implementation against {prd_file}:
+The following issues were found in the final implementation.
+
+## Stories under review
+
+{stories_under_review}
+
+## Findings to fix
 
 {findings}
 
@@ -111,25 +123,30 @@ Fix these issues in the codebase.
 
 Requirements:
 - address every finding unless two findings are duplicates
+- only fix issues related to the stories listed above
 - preserve already-correct behavior
 - avoid unrelated refactors
 - add or update tests where needed
 - keep changes minimal but sufficient
-- ensure the implementation remains aligned with the PRD
 
 Do not just describe the fixes. Make the code changes."""
 
 _ORCHESTRATED_REVIEW_PROMPT = """\
-Review the latest iteration against the requirements in {prd_file}.
+Review the latest iteration against ONLY the user stories listed below.
+Do NOT evaluate against stories that are not listed here.
 
-Start from this git diff:
+## Stories under review
+
+{stories_under_review}
+
+## Git diff
 
 {diff}
 {previous_findings}
 You may inspect the changed files and nearby code as needed.
 
 Check for:
-- requirement mismatches
+- requirement mismatches against the acceptance criteria above
 - broken or incomplete behavior
 - regressions
 - missing edge-case handling
@@ -152,7 +169,13 @@ Only report findings that materially affect correctness, completeness, or reliab
 {test_commands_guidance}"""
 
 _ORCHESTRATED_FIX_PROMPT = """\
-The following issues were found in the latest code changes against {prd_file}:
+The following issues were found in the latest code changes.
+
+## Stories under review
+
+{stories_under_review}
+
+## Findings to fix
 
 {findings}
 
@@ -160,6 +183,7 @@ Fix these issues in the repository.
 
 Requirements:
 - resolve each finding concretely
+- only fix issues related to the stories listed above
 - preserve correct existing changes
 - avoid unrelated edits
 - keep the patch as small as possible while fully fixing the problems

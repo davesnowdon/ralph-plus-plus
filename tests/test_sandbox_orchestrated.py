@@ -1,5 +1,6 @@
 """Tests for orchestrated sandbox mode — infra failure and test-failure handling."""
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -74,7 +75,7 @@ def _setup_worktree(tmp_path: Path) -> Path:
     worktree.mkdir()
     ralph_dir = worktree / "scripts" / "ralph"
     ralph_dir.mkdir(parents=True)
-    (ralph_dir / "prd.json").write_text('{"stories": []}')
+    (ralph_dir / "prd.json").write_text('{"userStories": []}')
     return worktree
 
 
@@ -231,7 +232,7 @@ class TestFixerInfraFailure:
                 passed=False, findings="Issues found", max_severity=None, minor_only=False
             )
 
-        def mock_fixer(findings, worktree_path, config):
+        def mock_fixer(findings, worktree_path, config, stories=""):
             # Fixer fails
             return _fake_subprocess_run(returncode=1, stderr="fixer crashed")
 
@@ -326,7 +327,7 @@ class TestFixInPlaceTestRerun:
                 passed=False, findings="Issues found", max_severity=None, minor_only=False
             )
 
-        def mock_fixer(findings, worktree_path, config):
+        def mock_fixer(findings, worktree_path, config, stories=""):
             return _fake_subprocess_run(returncode=0, stdout="fixed")
 
         def mock_test_commands(worktree_path, commands):
@@ -387,7 +388,7 @@ class TestFixInPlaceTestRerun:
                 )
             return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
-        def mock_fixer(findings, worktree_path, config):
+        def mock_fixer(findings, worktree_path, config, stories=""):
             return _fake_subprocess_run(returncode=0, stdout="fixed")
 
         def mock_test_commands(worktree_path, commands):
@@ -559,7 +560,7 @@ class TestPromptPropagation:
         assert fix_prompt.exists(), ".fix-prompt.md should be written"
         content = fix_prompt.read_text()
         assert findings_text in content
-        assert "prd.json" in content
+        assert "Stories under review" in content
 
 
 class TestRetriesExhaustedAborts:
@@ -796,7 +797,7 @@ class TestPreviousFindings:
                 )
             return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
-        def mock_fixer(findings, worktree_path, config):
+        def mock_fixer(findings, worktree_path, config, stories=""):
             return _fake_subprocess_run(returncode=0, stdout="fixed")
 
         commit_calls = []
@@ -1325,3 +1326,90 @@ class TestTestCommandsGuidance:
 
         assert captured_prompt is not None
         assert "Do NOT run bare pytest" not in captured_prompt
+
+
+class TestStoryScopedReview:
+    """Reviewer should only see stories relevant to the current iteration."""
+
+    def test_review_prompt_contains_story_text(self, tmp_path):
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=1)
+
+        captured_prompt = None
+
+        def mock_tool_run(prompt, cwd):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return ToolResult(output="LGTM", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = mock_tool_run
+            mock_make_tool.return_value = mock_tool
+
+            _review_iteration(
+                iteration=1,
+                diff="diff",
+                worktree_path=worktree,
+                config=config,
+                stories_under_review="### US-001: Add feature\nAs a user...",
+            )
+
+        assert captured_prompt is not None
+        assert "US-001: Add feature" in captured_prompt
+        assert "Do NOT evaluate against stories that are not listed" in captured_prompt
+
+    def test_prd_helpers_parse_stories(self, tmp_path):
+        from ralph_pp.steps.sandbox import format_stories, read_story_status
+
+        prd_json = tmp_path / "prd.json"
+        prd_json.write_text(
+            json.dumps(
+                {
+                    "userStories": [
+                        {
+                            "id": "US-001",
+                            "title": "Add field",
+                            "description": "As a dev...",
+                            "acceptanceCriteria": ["Field exists", "Tests pass"],
+                            "passes": True,
+                        },
+                        {
+                            "id": "US-002",
+                            "title": "Remove query",
+                            "description": "As a dev...",
+                            "acceptanceCriteria": ["Method removed"],
+                            "passes": False,
+                        },
+                    ]
+                }
+            )
+        )
+
+        status = read_story_status(prd_json)
+        assert status == {"US-001": True, "US-002": False}
+
+        text = format_stories(prd_json, {"US-001"})
+        assert "US-001: Add field" in text
+        assert "Field exists" in text
+        assert "US-002" not in text
+
+    def test_prd_parse_error_on_bad_json(self, tmp_path):
+        from ralph_pp.steps.sandbox import PrdParseError, read_story_status
+
+        prd_json = tmp_path / "prd.json"
+        prd_json.write_text("not json")
+
+        with pytest.raises(PrdParseError, match="Failed to parse"):
+            read_story_status(prd_json)
+
+    def test_prd_parse_error_on_missing_key(self, tmp_path):
+        from ralph_pp.steps.sandbox import PrdParseError, read_story_status
+
+        prd_json = tmp_path / "prd.json"
+        prd_json.write_text('{"project": "test"}')
+
+        with pytest.raises(PrdParseError, match="missing 'userStories' key"):
+            read_story_status(prd_json)
