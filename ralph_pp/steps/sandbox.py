@@ -8,7 +8,6 @@ Supports two modes:
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -328,14 +327,10 @@ def _setup_worktree_files(worktree_path: Path) -> None:
     # Copy upstream CLAUDE.md from the ralph-sandbox image's /opt/ralph/
     # source — but since we're on the host, we look for it in the worktree
     # or fall back to a reasonable default prompt.
+    # scripts/ralph/CLAUDE.md is owned by ralph++ — always write the
+    # orchestrated coder prompt so the coder gets single-story instructions.
     claude_md = ralph_dir / "CLAUDE.md"
-    if not claude_md.exists():
-        # Check if there's a CLAUDE.md at the repo root we can use
-        repo_claude = worktree_path / "CLAUDE.md"
-        if repo_claude.exists():
-            shutil.copy2(repo_claude, claude_md)
-        else:
-            claude_md.write_text(_ORCHESTRATED_CODER_PROMPT)
+    claude_md.write_text(_ORCHESTRATED_CODER_PROMPT)
 
     progress = ralph_dir / "progress.txt"
     if not progress.exists():
