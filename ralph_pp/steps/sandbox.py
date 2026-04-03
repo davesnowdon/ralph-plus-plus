@@ -493,10 +493,14 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
         pre_sha = _get_head_sha(worktree_path)
 
-        # Snapshot prd.json so it survives git reset --hard during backout.
-        # Must be re-read each iteration so backout restores the current state
-        # (with previously-completed stories) rather than the initial state.
-        saved_prd_json = prd_json.read_text()
+        # Snapshot files that must survive git reset --hard during backout.
+        # prd.json is re-read each iteration so backout restores the current
+        # state (with previously-completed stories) rather than the initial one.
+        # .base-sha is static but gets destroyed by reset if it was staged.
+        base_sha_path = worktree_path / BASE_SHA_FILE
+        restore_files: dict[Path, str] = {prd_json: prd_json.read_text()}
+        if base_sha_path.exists():
+            restore_files[base_sha_path] = base_sha_path.read_text()
 
         # Run coding step (with retries for backout mode)
         max_attempts = orch.max_iteration_retries + 1 if orch.backout_on_failure else 1
@@ -555,7 +559,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if result.returncode != 0:
                 console.print(f"  [red]✗ Coder process failed (exit {result.returncode})[/red]")
                 if orch.backout_on_failure and attempt < max_attempts:
-                    _backout_to(worktree_path, pre_sha, restore_files={prd_json: saved_prd_json})
+                    _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                     continue
                 console.print("  [red]Infra failure — skipping review[/red]")
                 break
@@ -623,7 +627,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     tests_failed = True
                     if orch.backout_on_failure and attempt < max_attempts:
                         _backout_to(
-                            worktree_path, pre_sha, restore_files={prd_json: saved_prd_json}
+                            worktree_path, pre_sha, restore_files=restore_files
                         )
                         continue
 
@@ -663,7 +667,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if orch.backout_on_failure:
                 # PATH A: Backout and retry
                 if attempt < max_attempts:
-                    _backout_to(worktree_path, pre_sha, restore_files={prd_json: saved_prd_json})
+                    _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                 else:
                     console.print(
                         f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
