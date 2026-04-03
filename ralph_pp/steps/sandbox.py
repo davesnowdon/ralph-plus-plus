@@ -19,7 +19,13 @@ from ..config import TEST_COMMANDS_GUIDANCE, Config, OrchestratedConfig
 from ..sandbox import resolve_sandbox_dir
 from ..tools import make_tool
 from ..tools.base import parse_max_severity, severity_at_or_above
-from ._git import commit_if_dirty, get_diff, get_head_sha
+from ._git import (
+    commit_if_dirty,
+    format_test_results,
+    get_diff,
+    get_head_sha,
+    run_test_commands_with_output,
+)
 
 console = Console()
 
@@ -179,17 +185,6 @@ def _backout_to(
         for path, content in restore_files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
-
-
-def _run_test_commands(worktree_path: Path, commands: list[str]) -> bool:
-    """Run test/lint commands. Returns True if all pass."""
-    for cmd in commands:
-        console.print(f"[dim]  $ {cmd}[/dim]")
-        result = subprocess.run(cmd, shell=True, cwd=worktree_path)
-        if result.returncode != 0:
-            console.print(f"[red]  ✗ Command failed: {cmd}[/red]")
-            return False
-    return True
 
 
 def _render_prompt(template: str, **kwargs: str) -> str:
@@ -355,6 +350,7 @@ def _review_iteration(
     previous_findings: str = "",
     fixer_diff: str = "",
     stories_under_review: str = "",
+    test_results: str = "",
 ) -> ReviewResult:
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
@@ -382,6 +378,7 @@ def _review_iteration(
         stories_under_review=stories_under_review,
         previous_findings=context,
         test_commands_guidance=_test_commands_guidance(orch),
+        test_results=test_results,
     )
     result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
     if not result.success:
@@ -582,9 +579,15 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
             # Run tests/linter (optional)
             tests_failed = False
+            test_results_text = ""
             if orch.run_tests_between_steps and orch.test_commands:
                 console.print("  [dim]Running test commands...[/dim]")
-                tests_ok = _run_test_commands(worktree_path, orch.test_commands)
+                tests_ok, test_output = run_test_commands_with_output(
+                    worktree_path, orch.test_commands
+                )
+                if test_output:
+                    console.print(test_output)
+                test_results_text = format_test_results(test_output, tests_ok)
                 if not tests_ok:
                     console.print("  [yellow]Tests failed — treating as review failure[/yellow]")
                     tests_failed = True
@@ -611,6 +614,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 config,
                 previous_findings=last_findings,
                 stories_under_review=stories_text,
+                test_results=test_results_text,
             )
             last_findings = review.findings
 
@@ -659,9 +663,16 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     fix_diff = _get_diff(worktree_path, pre_fix_sha)
 
                     # Re-run tests after fix (if enabled)
+                    fix_test_results = ""
                     if orch.run_tests_between_steps and orch.test_commands:
                         console.print("  [dim]Re-running test commands after fix...[/dim]")
-                        if not _run_test_commands(worktree_path, orch.test_commands):
+                        fix_tests_ok, fix_test_output = run_test_commands_with_output(
+                            worktree_path, orch.test_commands
+                        )
+                        if fix_test_output:
+                            console.print(fix_test_output)
+                        fix_test_results = format_test_results(fix_test_output, fix_tests_ok)
+                        if not fix_tests_ok:
                             console.print("  [yellow]Tests still failing after fix[/yellow]")
                             continue
 
@@ -675,6 +686,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         previous_findings=review.findings,
                         fixer_diff=fix_diff,
                         stories_under_review=stories_text,
+                        test_results=fix_test_results,
                     )
                     last_findings = review.findings
                     if review.passed:

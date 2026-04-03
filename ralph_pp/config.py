@@ -166,7 +166,8 @@ For each finding include:
 - recommended fix: the smallest reasonable corrective action
 
 Only report findings that materially affect correctness, completeness, or reliability.
-{test_commands_guidance}"""
+{test_commands_guidance}
+{test_results}"""
 
 _ORCHESTRATED_FIX_PROMPT = """\
 The following issues were found in the latest code changes.

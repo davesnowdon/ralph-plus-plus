@@ -280,12 +280,15 @@ class TestTestFailureBlocking:
             return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         def mock_test_commands(worktree_path, commands):
-            return False  # tests fail
+            return False, "tests failed output"  # tests fail
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
+            patch(
+                "ralph_pp.steps.sandbox.run_test_commands_with_output",
+                side_effect=mock_test_commands,
+            ),
             patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
             patch(
@@ -333,13 +336,16 @@ class TestFixInPlaceTestRerun:
         def mock_test_commands(worktree_path, commands):
             nonlocal test_call_count
             test_call_count += 1
-            return False  # tests always fail
+            return False, "tests failed output"  # tests always fail
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
-            patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
+            patch(
+                "ralph_pp.steps.sandbox.run_test_commands_with_output",
+                side_effect=mock_test_commands,
+            ),
             patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
             patch(
@@ -395,14 +401,17 @@ class TestFixInPlaceTestRerun:
             nonlocal test_call_count
             test_call_count += 1
             if test_call_count == 1:
-                return False  # initial tests fail
-            return True  # tests pass after fix
+                return False, "tests failed output"  # initial tests fail
+            return True, "all tests passed"  # tests pass after fix
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
-            patch("ralph_pp.steps.sandbox._run_test_commands", side_effect=mock_test_commands),
+            patch(
+                "ralph_pp.steps.sandbox.run_test_commands_with_output",
+                side_effect=mock_test_commands,
+            ),
             patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
             patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
             patch(
@@ -771,6 +780,65 @@ class TestPreviousFindings:
 
         assert captured_prompt is not None
         assert "previous review cycle" not in captured_prompt
+
+    def test_test_results_passed_to_reviewer(self, tmp_path):
+        """When test_results is provided, the reviewer prompt includes them."""
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=1)
+
+        captured_prompt = None
+
+        def mock_tool_run(prompt, cwd):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return ToolResult(output="LGTM", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = mock_tool_run
+            mock_make_tool.return_value = mock_tool
+
+            _review_iteration(
+                iteration=1,
+                diff="some diff",
+                worktree_path=worktree,
+                config=config,
+                test_results="test/CI results were obtained before this review (PASSED)",
+            )
+
+        assert captured_prompt is not None
+        assert "test/CI results were obtained before this review" in captured_prompt
+
+    def test_no_test_results_when_empty(self, tmp_path):
+        """When test_results is empty, no test results block appears in prompt."""
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=1)
+
+        captured_prompt = None
+
+        def mock_tool_run(prompt, cwd):
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return ToolResult(output="LGTM", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = mock_tool_run
+            mock_make_tool.return_value = mock_tool
+
+            _review_iteration(
+                iteration=1,
+                diff="some diff",
+                worktree_path=worktree,
+                config=config,
+            )
+
+        assert captured_prompt is not None
+        assert "test/CI results" not in captured_prompt
 
     def test_fixer_changes_committed(self, tmp_path):
         """In fix-in-place mode, _commit_if_dirty is called after fixer runs."""

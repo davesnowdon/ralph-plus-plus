@@ -8,7 +8,7 @@ from rich.console import Console
 
 from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
 from ..tools import make_tool, make_tool_with_permissions
-from ._git import get_diff, get_head_sha, run_test_commands_with_output
+from ._git import format_test_results, get_diff, get_head_sha, run_test_commands_with_output
 from .prd import MaxCyclesAbort, prompt_max_cycles
 from .sandbox import format_all_completed
 
@@ -95,13 +95,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
                 tests_ok, test_output = run_test_commands_with_output(worktree_path, test_cmds)
                 status_str = "PASSED" if tests_ok else "FAILED"
                 console.print(f"  [dim]Tests {status_str}[/dim]")
-                test_results_text = (
-                    f"\nThe following test/CI results were obtained before this review "
-                    f"({status_str}):\n\n{test_output}\n\n"
-                    "Use these results as a starting point. You may re-run the configured "
-                    "CI commands if you need to verify specific fixes, but do NOT run bare "
-                    "pytest or other tools.\n"
-                )
+                test_results_text = format_test_results(test_output, tests_ok)
 
             review_prompt = (
                 review_cfg.reviewer_prompt.replace("{stories_under_review}", stories_text)
