@@ -310,25 +310,27 @@ def _run_delegated(worktree_path: Path, config: Config) -> bool:
 # ── Orchestrated mode ──────────────────────────────────────────────────
 
 
+def _write_coder_prompt(worktree_path: Path, findings: str = "") -> None:
+    """Write the orchestrated coder prompt, optionally with review findings."""
+    ralph_dir = worktree_path / "scripts" / "ralph"
+    ralph_dir.mkdir(parents=True, exist_ok=True)
+    prompt = _ORCHESTRATED_CODER_PROMPT
+    if findings:
+        prompt += "\n" + findings
+    (ralph_dir / "CLAUDE.md").write_text(prompt)
+
+
 def _setup_worktree_files(worktree_path: Path) -> None:
     """Ensure scripts/ralph/ has the required files for orchestrated mode.
 
     In custom-runner mode the sandbox entrypoint does not copy ralph.sh or
     CLAUDE.md, so ralph++ must set them up before the first iteration.
     """
-    ralph_dir = worktree_path / "scripts" / "ralph"
-    ralph_dir.mkdir(parents=True, exist_ok=True)
+    _write_coder_prompt(worktree_path)
 
-    # Copy upstream CLAUDE.md from the ralph-sandbox image's /opt/ralph/
-    # source — but since we're on the host, we look for it in the worktree
-    # or fall back to a reasonable default prompt.
-    # scripts/ralph/CLAUDE.md is owned by ralph++ — always write the
-    # orchestrated coder prompt so the coder gets single-story instructions.
-    claude_md = ralph_dir / "CLAUDE.md"
-    claude_md.write_text(_ORCHESTRATED_CODER_PROMPT)
-
-    progress = ralph_dir / "progress.txt"
+    progress = worktree_path / "scripts" / "ralph" / "progress.txt"
     if not progress.exists():
+        progress.parent.mkdir(parents=True, exist_ok=True)
         progress.write_text("# Ralph Progress Log\nStarted: orchestrated mode\n---\n")
 
 
@@ -509,6 +511,13 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
                 iter_prompt.write_text(prompt_text)
                 extra_env["RALPH_PROMPT_FILE"] = str(Path("scripts/ralph/.iteration-prompt.md"))
+            elif attempt > 1 and last_findings:
+                # Default prompt flow: append review findings to CLAUDE.md so the
+                # coder knows why its previous attempt was rejected.
+                _write_coder_prompt(
+                    worktree_path,
+                    findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
+                )
 
             # Run coder in sandbox
             cmd = _build_sandbox_command(

@@ -1023,6 +1023,114 @@ class TestPreviousFindings:
         content = iter_prompt.read_text()
         assert findings_text in content, "Retry prompt should include previous review findings"
 
+    def test_backout_retry_appends_findings_to_claude_md(self, tmp_path):
+        """Default flow (no custom template): retry appends findings to CLAUDE.md."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=1, backout_on_failure=True
+        )
+        # No custom prompt_template — uses default CLAUDE.md flow
+
+        review_count = 0
+        findings_text = "MAJOR: update_last_access missing timezone validation"
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            nonlocal review_count
+            review_count += 1
+            if review_count == 1:
+                return ReviewResult(
+                    passed=False,
+                    findings=findings_text,
+                    max_severity="major",
+                    minor_only=False,
+                )
+            return ReviewResult(
+                passed=True, findings="LGTM", max_severity=None, minor_only=True
+            )
+
+        with (
+            patch(
+                "ralph_pp.steps.sandbox.subprocess.run",
+                side_effect=mock_subprocess_run,
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._review_iteration",
+                side_effect=mock_review,
+            ),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._get_head_sha",
+                side_effect=_incrementing_sha(),
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # CLAUDE.md should contain the review findings
+        claude_md = worktree / "scripts" / "ralph" / "CLAUDE.md"
+        content = claude_md.read_text()
+        assert findings_text in content, (
+            "Default CLAUDE.md should include review findings on retry"
+        )
+        assert "RETRY" in content, "Should include retry header"
+
+    def test_first_attempt_claude_md_has_no_findings(self, tmp_path):
+        """On the first attempt, CLAUDE.md is the clean prompt without findings."""
+        from ralph_pp.steps.sandbox import _ORCHESTRATED_CODER_PROMPT
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=0, backout_on_failure=True
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        with (
+            patch(
+                "ralph_pp.steps.sandbox.subprocess.run",
+                side_effect=mock_subprocess_run,
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._review_iteration",
+                return_value=ReviewResult(
+                    passed=True, findings="LGTM", max_severity=None, minor_only=True
+                ),
+            ),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._get_head_sha",
+                side_effect=_incrementing_sha(),
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        claude_md = worktree / "scripts" / "ralph" / "CLAUDE.md"
+        content = claude_md.read_text()
+        assert content == _ORCHESTRATED_CODER_PROMPT, (
+            "First attempt should use clean prompt without findings"
+        )
+
 
 class TestSeverityGatedBackout:
     """Backout should only trigger when findings meet the severity threshold."""
