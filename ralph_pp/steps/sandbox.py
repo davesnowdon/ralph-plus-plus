@@ -320,9 +320,9 @@ def _merge_env(extra: dict[str, str]) -> dict[str, str]:
 
 def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
     """Mode 2: ralph++ controls each iteration with review between them."""
-    console.print("[bold cyan]\n── Orchestrated mode ──[/bold cyan]")
-
     orch: OrchestratedConfig = config.orchestrated
+    strategy = "backout" if orch.backout_on_failure else "fixup"
+    console.print(f"[bold cyan]\n── Orchestrated mode ({strategy}) ──[/bold cyan]")
     session_runner = _session_runner_path(config)
 
     # Phase 0: Setup
