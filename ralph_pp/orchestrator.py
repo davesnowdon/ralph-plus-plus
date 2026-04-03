@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from rich.console import Console
@@ -10,8 +11,14 @@ from rich.rule import Rule
 
 from .config import Config
 from .hooks import run_hooks
+from .skills import ensure_prd_skills
 from .steps.post_review import post_review_loop
-from .steps.prd import convert_prd_to_json, generate_prd, review_prd_loop
+from .steps.prd import (
+    convert_prd_to_json,
+    feature_to_slug,
+    generate_prd,
+    review_prd_loop,
+)
 from .steps.sandbox import run_sandbox
 from .steps.worktree import cleanup_git_config, create_worktree
 
@@ -30,6 +37,8 @@ class Orchestrator:
         self,
         skip_prd_review: bool = False,
         skip_post_review: bool = False,
+        prd_only: bool = False,
+        prd_file: Path | None = None,
     ) -> None:
         title = "ralph++\nFeature: " + self.feature
         console.print(Panel.fit(title, border_style="bright_blue"))
@@ -39,8 +48,14 @@ class Orchestrator:
             return
 
         try:
+            if prd_only:
+                self._step_prd_only(skip_prd_review)
+                return
             self._step_worktree()
-            self._step_prd(skip_prd_review)
+            if prd_file is not None:
+                self._step_prd_from_file(prd_file)
+            else:
+                self._step_prd(skip_prd_review)
             self._step_sandbox()
             if not skip_post_review:
                 self._step_post_review()
@@ -65,9 +80,37 @@ class Orchestrator:
         self.worktree_path, self.branch = create_worktree(self.feature, self.config)
         run_hooks("post_worktree_create", self.config.hooks, self.worktree_path)
 
+    def _step_prd_only(self, skip_review: bool) -> None:
+        """Generate (and optionally review) the text PRD, then stop."""
+        base = self.config.repo_path
+        console.print(Rule("[bold]PRD Only[/bold]"))
+        ensure_prd_skills(self.config, base)
+        run_hooks("pre_prd_generate", self.config.hooks, base)
+        prd_file = generate_prd(self.feature, base, self.config)
+        run_hooks("post_prd_generate", self.config.hooks, base)
+        if not skip_review:
+            review_prd_loop(prd_file, base, self.config)
+
+        console.print(Rule(style="green"))
+        console.print(Panel.fit(prd_file.read_text(), title="PRD", border_style="cyan"))
+        summary = "✓ PRD generated!\nFile: " + str(prd_file)
+        console.print(Panel.fit(summary, border_style="green"))
+
+    def _step_prd_from_file(self, prd_file: Path) -> None:
+        """Copy an existing text PRD into the worktree and convert to JSON."""
+        assert self.worktree_path is not None
+        console.print(Rule("[bold]2 · PRD (from file)[/bold]"))
+        slug = feature_to_slug(self.feature)
+        dest = self.worktree_path / "tasks" / f"prd-{slug}.md"
+        dest.parent.mkdir(exist_ok=True)
+        shutil.copy2(prd_file, dest)
+        console.print(f"[green]✓ PRD copied:[/green] {prd_file} → {dest}")
+        convert_prd_to_json(dest, self.worktree_path, self.config)
+
     def _step_prd(self, skip_review: bool) -> None:
         assert self.worktree_path is not None
         console.print(Rule("[bold]2 · PRD[/bold]"))
+        ensure_prd_skills(self.config, self.worktree_path)
         run_hooks("pre_prd_generate", self.config.hooks, self.worktree_path)
         prd_file = generate_prd(self.feature, self.worktree_path, self.config)
         run_hooks("post_prd_generate", self.config.hooks, self.worktree_path)
@@ -78,7 +121,12 @@ class Orchestrator:
     def _step_sandbox(self) -> None:
         assert self.worktree_path is not None
         mode = self.config.ralph.mode
-        console.print(Rule(f"[bold]3 · Ralph Sandbox ({mode} mode)[/bold]"))
+        if mode == "orchestrated":
+            strategy = "backout" if self.config.orchestrated.backout_on_failure else "fixup"
+            label = f"{mode} mode, {strategy}"
+        else:
+            label = f"{mode} mode"
+        console.print(Rule(f"[bold]3 · Ralph Sandbox ({label})[/bold]"))
         run_hooks("pre_sandbox", self.config.hooks, self.worktree_path)
         success = run_sandbox(self.worktree_path, self.config)
         run_hooks("post_sandbox", self.config.hooks, self.worktree_path)

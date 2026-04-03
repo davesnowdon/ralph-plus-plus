@@ -1,0 +1,10 @@
+{
+  "name": "ralph-skills",
+  "version": "1.0.0",
+  "description": "PRD generation and conversion skills for the Ralph autonomous development workflow",
+  "author": {
+    "name": "Dave Snowdon"
+  },
+  "homepage": "https://github.com/davesnowdon/ralph-plus-plus",
+  "upstream": "https://github.com/snarktank/ralph"
+}

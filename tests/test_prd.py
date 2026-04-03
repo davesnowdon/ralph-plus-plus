@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ralph_pp.steps.prd import convert_prd_to_json, generate_prd
+from ralph_pp.steps.prd import convert_prd_to_json, feature_to_slug, generate_prd
 from ralph_pp.tools.base import ToolResult
 
 
@@ -14,14 +14,34 @@ def _make_config():
 
     return Config(
         tools={
-            "claude": ToolConfig(command="claude", args=["--print"], stdin="{prompt}"),
+            "claude-interactive": ToolConfig(
+                command="claude",
+                args=["{prompt}"],
+                interactive=True,
+                allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"],
+            ),
         }
     )
 
 
+class TestFeatureToSlug:
+    def test_simple(self):
+        assert feature_to_slug("test feature") == "test-feature"
+
+    def test_mixed_case_and_punctuation(self):
+        result = feature_to_slug("Freeze Canonical Memory Contracts")
+        assert result == "freeze-canonical-memory-contracts"
+
+    def test_special_characters(self):
+        assert feature_to_slug("add foo/bar support!") == "add-foobar-support"
+
+    def test_multiple_spaces_and_dashes(self):
+        assert feature_to_slug("  lots   of   spaces  ") == "lots-of-spaces"
+
+
 class TestGeneratePrd:
     def test_raises_when_file_missing_after_success(self, tmp_path):
-        """Exit 0 but tasks/prd.md not created should raise."""
+        """Exit 0 but tasks/prd-*.md not created should raise."""
         config = _make_config()
         fake_result = ToolResult(output="Done", exit_code=0, success=True)
 
@@ -34,9 +54,9 @@ class TestGeneratePrd:
                 generate_prd("test feature", tmp_path, config)
 
     def test_succeeds_when_file_exists(self, tmp_path):
-        """Exit 0 with tasks/prd.md present should succeed."""
+        """Exit 0 with tasks/prd-test-feature.md present should succeed."""
         config = _make_config()
-        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file = tmp_path / "tasks" / "prd-test-feature.md"
         prd_file.parent.mkdir(parents=True)
         prd_file.write_text("# PRD\nSome content")
 

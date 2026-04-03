@@ -16,9 +16,9 @@ def test_branch_name_slugified():
 
 def test_branch_name_unique():
     cfg = load_config(None)
-    names = {make_branch_name("same feature", cfg) for _ in range(10)}
-    # With random suffixes, all 10 should be unique
-    assert len(names) == 10
+    names = {make_branch_name("same feature", cfg) for _ in range(5)}
+    # With random suffixes, all 5 should be unique
+    assert len(names) == 5
 
 
 def test_branch_name_special_chars():

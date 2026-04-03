@@ -115,8 +115,10 @@ _sandbox_dir_option = click.option(
 @click.option(
     "--feature",
     "-f",
-    required=True,
-    help="Feature description (used to name the branch and generate the PRD).",
+    required=False,
+    default=None,
+    help="Feature description (used to name the branch and generate the PRD). "
+    "Derived from --prd-file filename when omitted.",
 )
 @_repo_option
 @_config_option
@@ -160,13 +162,31 @@ _sandbox_dir_option = click.option(
 )
 @_sandbox_dir_option
 @click.option(
+    "--setup-cmd",
+    multiple=True,
+    help="Shell command to run in the worktree after creation "
+    "(repeatable; prepended to post_worktree_create hooks).",
+)
+@click.option(
+    "--prd-only",
+    is_flag=True,
+    default=False,
+    help="Generate and review the text PRD, then stop. No worktree or implementation.",
+)
+@click.option(
+    "--prd-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to an existing text PRD. Skips generation/review, proceeds to implementation.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
     help="Print what would be done without executing anything.",
 )
 def run(
-    feature: str,
+    feature: str | None,
     repo: Path | None,
     config_file: Path | None,
     claude_config: Path | None,
@@ -175,10 +195,23 @@ def run(
     mode: str | None,
     skip_prd_review: bool,
     skip_post_review: bool,
+    setup_cmd: tuple[str, ...],
     sandbox_dir: Path | None,
+    prd_only: bool,
+    prd_file: Path | None,
     dry_run: bool,
 ) -> None:
     """Run the full Ralph agentic coding workflow."""
+    if prd_only and prd_file:
+        raise click.UsageError("--prd-only and --prd-file are mutually exclusive.")
+
+    # Derive feature from PRD filename when not explicitly provided.
+    if feature is None and prd_file is not None:
+        stem = prd_file.stem  # e.g. "prd-my-feature"
+        feature = stem.removeprefix("prd-") if stem.startswith("prd-") else stem
+    if feature is None:
+        raise click.UsageError("--feature is required (or provide --prd-file to derive it).")
+
     config_paths, repo = _resolve_config(config_file, repo)
     overrides = _build_overrides(repo, claude_config, codex_config, sandbox_dir)
 
@@ -189,11 +222,16 @@ def run(
         cfg.ralph.max_iterations = max_iters
     if mode is not None:
         cfg.ralph.mode = mode
+    if setup_cmd:
+        existing = cfg.hooks.get("post_worktree_create", [])
+        cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
 
     orchestrator = Orchestrator(feature=feature, config=cfg, dry_run=dry_run)
     orchestrator.run(
         skip_prd_review=skip_prd_review,
         skip_post_review=skip_post_review,
+        prd_only=prd_only,
+        prd_file=prd_file,
     )
 
 

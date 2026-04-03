@@ -9,31 +9,82 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
 
-from ..config import Config, OrchestratedConfig
+from ..config import TEST_COMMANDS_GUIDANCE, Config, OrchestratedConfig
 from ..sandbox import resolve_sandbox_dir
 from ..tools import make_tool
+from ..tools.base import parse_max_severity, severity_at_or_above
+from ._git import commit_if_dirty, get_diff, get_head_sha
 
 console = Console()
 
-_FALLBACK_CODER_PROMPT = """\
-Read scripts/ralph/prd.json and implement the next smallest incomplete user story.
+_ORCHESTRATED_CODER_PROMPT = """\
+# Ralph Agent Instructions (Orchestrated Mode)
 
-Requirements:
-- make only the changes needed for that story and its acceptance criteria
-- inspect the surrounding code before editing
-- preserve existing behavior unless the story requires a change
-- update or add tests when appropriate
-- keep the repository in a coherent, runnable state
-- commit your changes if your workflow expects it
+You are an autonomous coding agent working on a software project.
 
-If all stories are complete, output exactly:
+## Your Task
+
+1. Read the PRD at `scripts/ralph/prd.json`
+2. Read the progress log at `scripts/ralph/progress.txt` (check Codebase Patterns section first)
+3. Pick the **highest priority** user story where `passes` is `false`
+4. Implement that single user story
+5. Run quality checks (e.g., typecheck, lint, test — use whatever your project requires)
+6. If checks pass, commit ALL changes with message: `feat: [Story ID] - [Story Title]`
+7. Update `scripts/ralph/prd.json` to set `passes` to `true` for the completed story
+8. Append your progress to `scripts/ralph/progress.txt`
+
+## Progress Report Format
+
+APPEND to `scripts/ralph/progress.txt` (never replace, always append):
+```
+## [Date/Time] - [Story ID]
+- What was implemented
+- Files changed
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Useful context for future work
+---
+```
+
+The learnings section is critical — it helps future iterations avoid repeating \
+mistakes and understand the codebase better.
+
+## Consolidate Patterns
+
+If you discover a **reusable pattern** that future iterations should know, add \
+it to the `## Codebase Patterns` section at the TOP of `scripts/ralph/progress.txt` \
+(create it if it doesn't exist). Only add patterns that are **general and reusable**, \
+not story-specific details.
+
+## Quality Requirements
+
+- ALL commits must pass your project's quality checks (typecheck, lint, test)
+- Do NOT commit broken code
+- Keep changes focused and minimal
+- Follow existing code patterns
+
+## Stop Condition
+
+After completing a user story, check if ALL stories have `passes` set to `true`.
+
+If ALL stories are complete and passing, reply with:
 <promise>COMPLETE</promise>
 
-Do not output that completion signal unless every story in prd.json is complete.
+If there are still stories with `passes` set to `false`, end your response \
+normally (another iteration will pick up the next story).
+
+## Important
+
+- Work on ONE story per iteration
+- Commit frequently
+- Keep CI green
+- Read the Codebase Patterns section in progress.txt before starting
 """
 
 COMPLETE_SIGNAL = "<promise>COMPLETE</promise>"
@@ -99,26 +150,34 @@ def _build_sandbox_command(
 
 
 def _get_head_sha(worktree_path: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=worktree_path,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"git rev-parse HEAD failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
-    return result.stdout.strip()
+    return get_head_sha(worktree_path)
 
 
-def _backout_to(worktree_path: Path, sha: str) -> None:
+def _backout_to(
+    worktree_path: Path,
+    sha: str,
+    *,
+    restore_files: dict[Path, str] | None = None,
+) -> None:
+    """Hard-reset to *sha* and optionally restore scaffold files.
+
+    ``git reset --hard`` removes files that were staged after the target SHA
+    (e.g. ``scripts/ralph/`` scaffold written by ``_setup_worktree_files``).
+    Pass *restore_files* — a mapping of absolute paths to their content — to
+    re-create them after the reset.
+    """
     console.print(f"[yellow]  Backing out to {sha[:8]}...[/yellow]")
     subprocess.run(
         ["git", "reset", "--hard", sha],
         cwd=worktree_path,
         check=True,
     )
+    # Restore scaffold directory and base files destroyed by the hard reset.
+    _setup_worktree_files(worktree_path)
+    if restore_files:
+        for path, content in restore_files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
 
 
 def _run_test_commands(worktree_path: Path, commands: list[str]) -> bool:
@@ -140,16 +199,40 @@ def _render_prompt(template: str, **kwargs: str) -> str:
     return result
 
 
+def _test_commands_guidance(orch: OrchestratedConfig) -> str:
+    """Build test-command guidance block for reviewer prompts, or empty string."""
+    if not orch.test_commands:
+        return ""
+    cmd_list = "\n".join(f"  $ {cmd}" for cmd in orch.test_commands)
+    return TEST_COMMANDS_GUIDANCE.format(commands=cmd_list)
+
+
+_RETRY_HEADER = """\
+⚠ RETRY {attempt}/{max_attempts}
+Your previous attempt was REJECTED by the reviewer.
+The following findings MUST be resolved. Failure to address
+these specific issues will result in another rejection:
+
+"""
+
+
+def _wrap_retry_findings(findings: str, attempt: int, max_attempts: int) -> str:
+    """Prepend a structured header to findings on retry attempts."""
+    if attempt <= 1 or not findings:
+        return findings
+    return _RETRY_HEADER.format(attempt=attempt, max_attempts=max_attempts) + findings
+
+
 def _get_diff(worktree_path: Path, from_sha: str) -> str:
-    result = subprocess.run(
-        ["git", "diff", from_sha, "HEAD"],
-        cwd=worktree_path,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"git diff failed (exit {result.returncode}): {result.stderr.strip()}")
-    return result.stdout or "(no diff)"
+    return get_diff(worktree_path, from_sha)
+
+
+def _commit_if_dirty(worktree_path: Path, message: str) -> bool:
+    """Stage and commit all changes if the working tree has uncommitted work.
+
+    Returns True if a commit was created, False if tree was clean.
+    """
+    return commit_if_dirty(worktree_path, message)
 
 
 # ── Delegated mode ─────────────────────────────────────────────────────
@@ -199,11 +282,21 @@ def _setup_worktree_files(worktree_path: Path) -> None:
         if repo_claude.exists():
             shutil.copy2(repo_claude, claude_md)
         else:
-            claude_md.write_text(_FALLBACK_CODER_PROMPT)
+            claude_md.write_text(_ORCHESTRATED_CODER_PROMPT)
 
     progress = ralph_dir / "progress.txt"
     if not progress.exists():
         progress.write_text("# Ralph Progress Log\nStarted: orchestrated mode\n---\n")
+
+
+@dataclass
+class ReviewResult:
+    """Structured result from a review iteration."""
+
+    passed: bool
+    findings: str
+    max_severity: str | None  # None when LGTM or unparseable
+    minor_only: bool  # True when all findings are minor (or LGTM)
 
 
 def _review_iteration(
@@ -211,13 +304,37 @@ def _review_iteration(
     diff: str,
     worktree_path: Path,
     config: Config,
-) -> tuple[bool, str]:
-    """Run reviewer on the iteration diff. Returns (passed, findings)."""
+    previous_findings: str = "",
+    fixer_diff: str = "",
+) -> ReviewResult:
+    """Run reviewer on the iteration diff."""
     orch = config.orchestrated
     reviewer = make_tool(orch.reviewer, config)
     prd_file = str(worktree_path / "scripts" / "ralph" / "prd.json")
 
-    review_prompt = _render_prompt(orch.review_prompt, diff=diff, prd_file=prd_file)
+    if previous_findings:
+        context = (
+            "\nThe previous review cycle found these issues (which have since "
+            "been addressed by a fix pass). Focus on whether the fixes are "
+            "adequate and whether any NEW issues remain. Do not re-raise issues "
+            "that have been resolved:\n\n"
+            f"{previous_findings}\n"
+        )
+        if fixer_diff:
+            context += (
+                "\nThe fixer made the following changes to address those findings:\n\n"
+                f"{fixer_diff}\n"
+            )
+    else:
+        context = ""
+
+    review_prompt = _render_prompt(
+        orch.review_prompt,
+        diff=diff,
+        prd_file=prd_file,
+        previous_findings=context,
+        test_commands_guidance=_test_commands_guidance(orch),
+    )
     result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
     if not result.success:
         raise RuntimeError(
@@ -226,10 +343,26 @@ def _review_iteration(
 
     if result.is_lgtm:
         console.print(f"  [green]✓ Review passed (LGTM) — iteration {iteration}[/green]")
-        return True, result.output
+        return ReviewResult(passed=True, findings=result.output, max_severity=None, minor_only=True)
+
+    # Parse severity from reviewer output
+    max_sev = parse_max_severity(result.output)
+    threshold = orch.backout_severity_threshold
+
+    if max_sev is not None and not severity_at_or_above(max_sev, threshold):
+        # All findings are below the backout threshold — accept with warnings
+        console.print(
+            f"  [yellow]Review found only {max_sev} issues — "
+            f"accepting iteration {iteration} with warnings[/yellow]"
+        )
+        return ReviewResult(
+            passed=True, findings=result.output, max_severity=max_sev, minor_only=True
+        )
 
     console.print(f"  [yellow]Issues found in iteration {iteration}[/yellow]")
-    return False, result.output
+    return ReviewResult(
+        passed=False, findings=result.output, max_severity=max_sev, minor_only=False
+    )
 
 
 def _run_fixer_in_sandbox(
@@ -272,9 +405,9 @@ def _merge_env(extra: dict[str, str]) -> dict[str, str]:
 
 def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
     """Mode 2: ralph++ controls each iteration with review between them."""
-    console.print("[bold cyan]\n── Orchestrated mode ──[/bold cyan]")
-
     orch: OrchestratedConfig = config.orchestrated
+    strategy = "backout" if orch.backout_on_failure else "fixup"
+    console.print(f"[bold cyan]\n── Orchestrated mode ({strategy}) ──[/bold cyan]")
     session_runner = _session_runner_path(config)
 
     # Phase 0: Setup
@@ -283,28 +416,18 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
     if not prd_json.exists():
         raise FileNotFoundError(f"prd.json not found at {prd_json}")
 
+    # Save scaffold files so they survive git reset --hard during backout.
+    # _commit_if_dirty uses `git add -A` which stages these untracked files,
+    # so a hard reset to the pre-iteration SHA removes them.
+    saved_prd_json = prd_json.read_text()
+
     last_findings = ""
+    consecutive_idle = 0
 
     for iteration in range(1, config.ralph.max_iterations + 1):
         console.print(f"\n[bold]═══ Iteration {iteration}/{config.ralph.max_iterations} ═══[/bold]")
 
         pre_sha = _get_head_sha(worktree_path)
-
-        # Optionally write per-iteration prompt
-        extra_env: dict[str, str] = {}
-        if orch.prompt_template is not None:
-            progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
-            progress_text = progress_file.read_text() if progress_file.exists() else ""
-            prompt_text = _render_prompt(
-                orch.prompt_template,
-                iteration=str(iteration),
-                prd_file=str(prd_json),
-                progress=progress_text,
-                review_findings=last_findings,
-            )
-            iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
-            iter_prompt.write_text(prompt_text)
-            extra_env["RALPH_PROMPT_FILE"] = str(Path("scripts/ralph/.iteration-prompt.md"))
 
         # Run coding step (with retries for backout mode)
         max_attempts = orch.max_iteration_retries + 1 if orch.backout_on_failure else 1
@@ -315,6 +438,22 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 console.print(
                     f"  [yellow]Retry {attempt}/{max_attempts} for iteration {iteration}[/yellow]"
                 )
+
+            # Write per-attempt prompt (inside loop so retries get latest findings)
+            extra_env: dict[str, str] = {}
+            if orch.prompt_template is not None:
+                progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+                progress_text = progress_file.read_text() if progress_file.exists() else ""
+                prompt_text = _render_prompt(
+                    orch.prompt_template,
+                    iteration=str(iteration),
+                    prd_file=str(prd_json),
+                    progress=progress_text,
+                    review_findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
+                )
+                iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
+                iter_prompt.write_text(prompt_text)
+                extra_env["RALPH_PROMPT_FILE"] = str(Path("scripts/ralph/.iteration-prompt.md"))
 
             # Run coder in sandbox
             cmd = _build_sandbox_command(
@@ -340,7 +479,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if result.returncode != 0:
                 console.print(f"  [red]✗ Coder process failed (exit {result.returncode})[/red]")
                 if orch.backout_on_failure and attempt < max_attempts:
-                    _backout_to(worktree_path, pre_sha)
+                    _backout_to(worktree_path, pre_sha, restore_files={prd_json: saved_prd_json})
                     continue
                 console.print("  [red]Infra failure — skipping review[/red]")
                 break
@@ -349,6 +488,27 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if COMPLETE_SIGNAL in combined_output:
                 console.print("[green]Ralph signaled COMPLETE[/green]")
                 return True
+
+            # Force-commit any uncommitted coder changes
+            _commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
+
+            # Idle detection: if coder made no changes, it may have finished
+            post_sha = _get_head_sha(worktree_path)
+            if post_sha == pre_sha:
+                consecutive_idle += 1
+                if consecutive_idle >= orch.max_idle_iterations:
+                    console.print(
+                        f"[green]No changes for {consecutive_idle} consecutive iterations "
+                        "— treating as complete[/green]"
+                    )
+                    return True
+                console.print(
+                    f"  [dim]No changes this iteration "
+                    f"(idle {consecutive_idle}/{orch.max_idle_iterations})[/dim]"
+                )
+                break  # Skip review — nothing to review
+            else:
+                consecutive_idle = 0
 
             # Run tests/linter (optional)
             tests_failed = False
@@ -359,47 +519,59 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     console.print("  [yellow]Tests failed — treating as review failure[/yellow]")
                     tests_failed = True
                     if orch.backout_on_failure and attempt < max_attempts:
-                        _backout_to(worktree_path, pre_sha)
+                        _backout_to(
+                            worktree_path, pre_sha, restore_files={prd_json: saved_prd_json}
+                        )
                         continue
 
             # Review changes
             diff = _get_diff(worktree_path, pre_sha)
-            passed, findings = _review_iteration(iteration, diff, worktree_path, config)
-            last_findings = findings
+            review = _review_iteration(
+                iteration, diff, worktree_path, config, previous_findings=last_findings
+            )
+            last_findings = review.findings
 
-            if passed and not tests_failed:
+            if review.passed and not tests_failed:
+                if review.minor_only and review.max_severity is not None:
+                    console.print("  [dim]Minor findings carried forward[/dim]")
                 iteration_passed = True
                 break
-            elif tests_failed and passed:
+            elif tests_failed and review.passed:
                 console.print(
                     "  [yellow]Reviewer approved but tests failed — not accepting[/yellow]"
                 )
-                passed = False
-                last_findings = "Tests failed. " + findings
+                last_findings = "Tests failed. " + review.findings
 
             # Handle review failure
             if orch.backout_on_failure:
                 # PATH A: Backout and retry
                 if attempt < max_attempts:
-                    _backout_to(worktree_path, pre_sha)
+                    _backout_to(worktree_path, pre_sha, restore_files={prd_json: saved_prd_json})
                 else:
                     console.print(
-                        f"  [yellow]⚠ All retries exhausted for iteration "
-                        f"{iteration} — continuing[/yellow]"
+                        f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
                     )
-                    iteration_passed = False
+                    return False
             else:
                 # PATH B: Invoke fixer to fix in-place
                 for fix_cycle in range(1, orch.max_iteration_retries + 1):
                     console.print(
                         f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]"
                     )
-                    fixer_result = _run_fixer_in_sandbox(findings, worktree_path, config)
+                    pre_fix_sha = _get_head_sha(worktree_path)
+                    fixer_result = _run_fixer_in_sandbox(review.findings, worktree_path, config)
                     if fixer_result.returncode != 0:
                         console.print(
                             f"  [red]✗ Fixer process failed (exit {fixer_result.returncode})[/red]"
                         )
                         break
+
+                    # Force-commit any uncommitted fixer changes
+                    _commit_if_dirty(
+                        worktree_path,
+                        f"ralph: fixer cycle {fix_cycle} iteration {iteration}",
+                    )
+                    fix_diff = _get_diff(worktree_path, pre_fix_sha)
 
                     # Re-run tests after fix (if enabled)
                     if orch.run_tests_between_steps and orch.test_commands:
@@ -410,24 +582,34 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
                     # Re-review after fix
                     diff = _get_diff(worktree_path, pre_sha)
-                    passed, findings = _review_iteration(iteration, diff, worktree_path, config)
-                    last_findings = findings
-                    if passed:
+                    review = _review_iteration(
+                        iteration,
+                        diff,
+                        worktree_path,
+                        config,
+                        previous_findings=review.findings,
+                        fixer_diff=fix_diff,
+                    )
+                    last_findings = review.findings
+                    if review.passed:
                         iteration_passed = True
                         break
 
                 if not iteration_passed:
                     console.print(
-                        f"  [yellow]⚠ Fix cycles exhausted for iteration "
-                        f"{iteration} — continuing[/yellow]"
+                        f"  [red]✗ Fix cycles exhausted for iteration {iteration} — aborting[/red]"
                     )
+                    return False
                 break  # In fix-in-place mode we don't retry the coder, only the fixer
 
-        # Append to progress
-        progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
-        status = "passed" if iteration_passed else "failed"
-        with open(progress_file, "a") as f:
-            f.write(f"\n## Iteration {iteration} — {status}\n---\n")
+        # Append to progress (skip idle iterations — the coder writes its own
+        # detailed entries via the orchestrated prompt)
+        if consecutive_idle == 0:
+            progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+            progress_file.parent.mkdir(parents=True, exist_ok=True)
+            status = "passed" if iteration_passed else "failed"
+            with open(progress_file, "a") as f:
+                f.write(f"\n## Iteration {iteration} — {status}\n---\n")
 
     console.print(
         f"[yellow]Reached max iterations ({config.ralph.max_iterations}) "

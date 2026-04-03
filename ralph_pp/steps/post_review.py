@@ -6,8 +6,10 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ..config import Config, PostReviewConfig
-from ..tools import make_tool
+from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
+from ..tools import make_tool, make_tool_with_permissions
+from ._git import get_diff, get_head_sha, run_test_commands_with_output
+from .prd import MaxCyclesAbort, prompt_max_cycles
 
 console = Console()
 
@@ -16,6 +18,9 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
     """
     After the Ralph sandbox completes, run a full review of the implementation
     against prd.json. Iteratively fix issues until LGTM or max_cycles reached.
+
+    When *max_cycles* is exhausted without LGTM the user is prompted to choose:
+    quit, retry another batch of cycles, or continue anyway.
     """
     review_cfg: PostReviewConfig = config.post_review
     if not review_cfg.enabled:
@@ -23,36 +28,111 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
         return
 
     console.print("[bold cyan]\n── Step: Post-Run Review Loop ──[/bold cyan]")
-    reviewer = make_tool(review_cfg.reviewer, config)
-    fixer = make_tool(review_cfg.fixer, config)
+    if config.orchestrated.auto_allow_test_commands and config.orchestrated.test_commands:
+        reviewer = make_tool_with_permissions(
+            review_cfg.reviewer, config, config.orchestrated.test_commands
+        )
+    else:
+        reviewer = make_tool(review_cfg.reviewer, config)
+    if config.orchestrated.auto_allow_test_commands and config.orchestrated.test_commands:
+        fixer = make_tool_with_permissions(
+            review_cfg.fixer, config, config.orchestrated.test_commands
+        )
+    else:
+        fixer = make_tool(review_cfg.fixer, config)
 
     prd_json = worktree_path / "scripts" / "ralph" / "prd.json"
 
-    for cycle in range(1, review_cfg.max_cycles + 1):
-        console.print(f"[bold]Post-run review cycle {cycle}/{review_cfg.max_cycles}[/bold]")
-
-        review_prompt = review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_json))
-        result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
-        if not result.success:
-            raise RuntimeError(
-                f"Post-run reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+    total_cycles = 0
+    previous_findings: str = ""
+    last_fixer_diff: str = ""
+    while True:
+        for cycle in range(1, review_cfg.max_cycles + 1):
+            total_cycles += 1
+            console.print(
+                f"[bold]Post-run review cycle {total_cycles} "
+                f"({cycle}/{review_cfg.max_cycles} this batch)[/bold]"
             )
 
-        if result.is_lgtm:
-            console.print("[green]✓ Post-run review passed (LGTM)[/green]")
-            return
+            if previous_findings:
+                context = (
+                    "\nThe previous review cycle found these issues (which have since "
+                    "been addressed by a fix pass). Focus on whether the fixes are "
+                    "adequate and whether any NEW issues remain. Do not re-raise issues "
+                    "that have been resolved:\n\n"
+                    f"{previous_findings}\n"
+                )
+                if last_fixer_diff:
+                    context += (
+                        "\nThe fixer made the following changes to address those findings:\n\n"
+                        f"{last_fixer_diff}\n"
+                    )
+            else:
+                context = ""
 
-        console.print(f"[yellow]Issues found in cycle {cycle} — running fix pass...[/yellow]")
-        fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_json)).replace(
-            "{findings}", result.output
+            test_cmds = config.orchestrated.test_commands
+            if test_cmds:
+                cmd_list = "\n".join(f"  $ {cmd}" for cmd in test_cmds)
+                guidance = TEST_COMMANDS_GUIDANCE.format(commands=cmd_list)
+            else:
+                guidance = ""
+
+            # Pre-run tests so the reviewer gets concrete results
+            test_results_text = ""
+            if test_cmds:
+                console.print("  [dim]Running test commands before review...[/dim]")
+                tests_ok, test_output = run_test_commands_with_output(worktree_path, test_cmds)
+                status_str = "PASSED" if tests_ok else "FAILED"
+                console.print(f"  [dim]Tests {status_str}[/dim]")
+                test_results_text = (
+                    f"\nThe following test/CI results were obtained before this review "
+                    f"({status_str}):\n\n{test_output}\n\n"
+                    "Use these results as a starting point. You may re-run the configured "
+                    "CI commands if you need to verify specific fixes, but do NOT run bare "
+                    "pytest or other tools.\n"
+                )
+
+            review_prompt = (
+                review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_json))
+                .replace("{previous_findings}", context)
+                .replace("{test_commands_guidance}", guidance)
+                .replace("{test_results}", test_results_text)
+            )
+            result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
+            if not result.success:
+                raise RuntimeError(
+                    f"Post-run reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+                )
+
+            if result.is_lgtm:
+                console.print("[green]✓ Post-run review passed (LGTM)[/green]")
+                return
+
+            previous_findings = result.output
+            console.print(
+                f"[yellow]Issues found in cycle {total_cycles} — running fix pass...[/yellow]"
+            )
+            pre_fix_sha = get_head_sha(worktree_path)
+            fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_json)).replace(
+                "{findings}", result.output
+            )
+            fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
+            if not fix_result.success:
+                raise RuntimeError(
+                    f"Post-run fixer failed (exit {fix_result.exit_code}): "
+                    f"{fix_result.output[:200]}"
+                )
+            last_fixer_diff = get_diff(worktree_path, pre_fix_sha)
+
+        action = prompt_max_cycles(
+            "Post-run",
+            review_cfg.max_cycles,
+            continue_label="Accept — finish without reviewer approval",
         )
-        fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
-        if not fix_result.success:
-            raise RuntimeError(
-                f"Post-run fixer failed (exit {fix_result.exit_code}): {fix_result.output[:200]}"
-            )
-
-    console.print(
-        f"[yellow]⚠ Post-run review: max cycles ({review_cfg.max_cycles}) "
-        "reached — continuing[/yellow]"
-    )
+        if action == "quit":
+            raise MaxCyclesAbort
+        if action == "continue":
+            console.print("[yellow]Accepting implementation without reviewer approval[/yellow]")
+            return
+        # action == "retry" → loop again
+        console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")

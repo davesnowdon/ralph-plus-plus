@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 
 # ── default prompt constants ────────────────────────────────────────
 
+TEST_COMMANDS_GUIDANCE = """
+IMPORTANT: This project uses specific CI commands for testing and linting.
+Always use these commands instead of running tools directly:
+{commands}
+Do NOT run bare pytest, mypy, ruff, or other tools outside these commands —
+the project may require specific virtual environments or configurations."""
+
 _PRD_REVIEWER_PROMPT = """\
 Read the PRD at {prd_file}.
 
@@ -24,9 +31,13 @@ Evaluate whether it is:
 - implementable as a sequence of small independent user stories
 - testable with concrete acceptance criteria
 - explicit about constraints, edge cases, and non-goals where relevant
-
+{previous_findings}
 If the PRD is fully satisfactory, output exactly:
 LGTM
+
+If only minor issues remain (nits, style, non-blocking suggestions), output:
+LGTM
+Then list the minor observations below for informational purposes.
 
 Otherwise, output a numbered list of issues.
 
@@ -69,9 +80,13 @@ Check for:
 - obvious design or contract violations
 - missing or inadequate tests
 - mismatches between the implementation and the PRD
-
+{previous_findings}
 If everything looks correct, output exactly:
 LGTM
+
+If only minor issues remain (nits, style, non-blocking suggestions), output:
+LGTM
+Then list the minor observations below for informational purposes.
 
 Otherwise, output a numbered list of findings.
 
@@ -83,7 +98,9 @@ For each finding include:
 - recommended fix: the smallest reasonable corrective action
 
 Be specific. Do not give vague style feedback unless it affects
-correctness or maintainability materially."""
+correctness or maintainability materially.
+{test_commands_guidance}
+{test_results}"""
 
 _POST_FIXER_PROMPT = """\
 The following issues were found in the final implementation against {prd_file}:
@@ -108,7 +125,7 @@ Review the latest iteration against the requirements in {prd_file}.
 Start from this git diff:
 
 {diff}
-
+{previous_findings}
 You may inspect the changed files and nearby code as needed.
 
 Check for:
@@ -131,7 +148,8 @@ For each finding include:
 - evidence: what in the diff or code supports the finding
 - recommended fix: the smallest reasonable corrective action
 
-Only report findings that materially affect correctness, completeness, or reliability."""
+Only report findings that materially affect correctness, completeness, or reliability.
+{test_commands_guidance}"""
 
 _ORCHESTRATED_FIX_PROMPT = """\
 The following issues were found in the latest code changes against {prd_file}:
@@ -159,6 +177,8 @@ class ToolConfig:
     args: list[str] = field(default_factory=lambda: list[str]())
     stdin: str | None = None  # template string sent via stdin
     env: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    interactive: bool = False  # if True, stdin/stdout pass through to terminal
+    allowed_tools: list[str] = field(default_factory=lambda: list[str]())  # --allowedTools
 
 
 @dataclass
@@ -203,6 +223,9 @@ class OrchestratedConfig:
     run_tests_between_steps: bool = False
     test_commands: list[str] = field(default_factory=lambda: list[str]())
     backout_on_failure: bool = True
+    backout_severity_threshold: str = "major"  # minor | major | critical
+    auto_allow_test_commands: bool = True
+    max_idle_iterations: int = 2
     review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
     fix_prompt: str = _ORCHESTRATED_FIX_PROMPT
     prompt_template: str | None = None
@@ -221,7 +244,8 @@ class Config:
 
     # Tools
     tools: dict[str, ToolConfig] = field(default_factory=lambda: dict[str, ToolConfig]())
-    prd_tool: str = "claude"  # tool for PRD generation and conversion
+    prd_tool: str = "claude-interactive"  # tool for PRD generation and conversion
+    prd_json_tool: str = "claude"  # tool for PRD-to-JSON conversion (non-interactive)
 
     # Review stages
     prd_review: PrdReviewConfig = field(default_factory=PrdReviewConfig)
@@ -284,6 +308,8 @@ def _parse_tools(data: dict[str, Any]) -> dict[str, ToolConfig]:
             args=cfg.get("args", []),
             stdin=cfg.get("stdin"),
             env=cfg.get("env", {}),
+            interactive=_parse_bool(cfg.get("interactive", False), False),
+            allowed_tools=cfg.get("allowed_tools", []),
         )
     return tools
 
@@ -440,18 +466,31 @@ def _build_config(data: dict[str, Any]) -> Config:
     cfg.branch_prefix = data.get("branch_prefix", cfg.branch_prefix)
     cfg.branch_suffix_length = int(data.get("branch_suffix_length", cfg.branch_suffix_length))
     cfg.prd_tool = data.get("prd_tool", cfg.prd_tool)
+    cfg.prd_json_tool = data.get("prd_json_tool", cfg.prd_json_tool)
 
     if "tools" in data:
         cfg.tools = _parse_tools(data["tools"])
     else:
         # Sensible defaults if no tools section
         cfg.tools = {
-            "codex": ToolConfig(type="cli", command="codex", args=["{prompt}"]),
+            "codex": ToolConfig(
+                type="cli",
+                command="codex",
+                args=["exec", "--full-auto", "{prompt}"],
+            ),
             "claude": ToolConfig(
                 type="cli",
                 command="claude",
-                args=["--dangerously-skip-permissions", "--print"],
+                args=["--print"],
                 stdin="{prompt}",
+                allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"],
+            ),
+            "claude-interactive": ToolConfig(
+                type="cli",
+                command="claude",
+                args=["{prompt}"],
+                interactive=True,
+                allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash(git:*)"],
             ),
         }
 
@@ -489,6 +528,13 @@ def _build_config(data: dict[str, Any]) -> Config:
                 o.get("backout_on_failure", defaults.backout_on_failure),
                 defaults.backout_on_failure,
             ),
+            backout_severity_threshold=o.get(
+                "backout_severity_threshold", defaults.backout_severity_threshold
+            ),
+            auto_allow_test_commands=_parse_bool(
+                o.get("auto_allow_test_commands", defaults.auto_allow_test_commands),
+                defaults.auto_allow_test_commands,
+            ),
             review_prompt=o.get("review_prompt", defaults.review_prompt),
             fix_prompt=o.get("fix_prompt", defaults.fix_prompt),
             prompt_template=o.get("prompt_template", defaults.prompt_template),
@@ -496,13 +542,16 @@ def _build_config(data: dict[str, Any]) -> Config:
 
     cfg.hooks = data.get("hooks", {})
 
-    # Auto-detect test commands when enabled but not configured
-    if cfg.orchestrated.run_tests_between_steps and not cfg.orchestrated.test_commands:
+    # Auto-detect test commands when needed but not explicitly configured
+    needs_detection = not cfg.orchestrated.test_commands and (
+        cfg.orchestrated.run_tests_between_steps or cfg.orchestrated.auto_allow_test_commands
+    )
+    if needs_detection:
         detected = detect_test_commands(cfg.repo_path)
         if detected:
             cfg.orchestrated.test_commands = detected
             logger.info("Auto-detected test commands: %s", detected)
-        else:
+        elif cfg.orchestrated.run_tests_between_steps:
             logger.warning(
                 "run_tests_between_steps is enabled but no test commands "
                 "configured or detected for %s",
@@ -536,6 +585,9 @@ def validate_config(cfg: Config) -> None:
     if cfg.prd_tool not in cfg.tools:
         errors.append(f"prd_tool={cfg.prd_tool!r} not in tools {list(cfg.tools)}")
 
+    if cfg.prd_json_tool not in cfg.tools:
+        errors.append(f"prd_json_tool={cfg.prd_json_tool!r} not in tools {list(cfg.tools)}")
+
     if cfg.ralph.sandbox_tool not in cfg.tools:
         errors.append(
             f"ralph.sandbox_tool={cfg.ralph.sandbox_tool!r} not in tools {list(cfg.tools)}"
@@ -558,6 +610,13 @@ def validate_config(cfg: Config) -> None:
             )
         if review_cfg.fixer not in cfg.tools:
             errors.append(f"{stage_name}.fixer={review_cfg.fixer!r} not in tools {list(cfg.tools)}")
+
+    valid_severities = {"minor", "major", "critical"}
+    if cfg.orchestrated.backout_severity_threshold not in valid_severities:
+        errors.append(
+            f"orchestrated.backout_severity_threshold="
+            f"{cfg.orchestrated.backout_severity_threshold!r} not in {valid_severities}"
+        )
 
     if not isinstance(cfg.orchestrated.test_commands, list):
         errors.append(

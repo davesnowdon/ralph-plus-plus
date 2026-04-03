@@ -35,6 +35,27 @@ def test_load_empty_config():
     assert cfg.ralph.sandbox_tool == "claude"
     assert "codex" in cfg.tools
     assert "claude" in cfg.tools
+    assert "claude-interactive" in cfg.tools
+    assert cfg.tools["claude-interactive"].interactive is True
+    assert cfg.tools["claude-interactive"].allowed_tools == [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash(git:*)",
+    ]
+    assert "-p" not in cfg.tools["claude-interactive"].args
+    assert cfg.tools["claude"].interactive is False
+    assert "--dangerously-skip-permissions" not in cfg.tools["claude"].args
+    assert cfg.tools["claude"].allowed_tools == [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash(git:*)",
+    ]
 
 
 def test_load_config_from_file():
@@ -103,8 +124,10 @@ def test_default_orchestrated_config():
     assert orch.fixer == "claude"
     assert orch.max_iteration_retries == 2
     assert orch.run_tests_between_steps is False
-    assert orch.test_commands == []
+    # test_commands may be auto-detected from the repo Makefile
+    assert isinstance(orch.test_commands, list)
     assert orch.backout_on_failure is True
+    assert orch.auto_allow_test_commands is True
     assert "{diff}" in orch.review_prompt
     assert "{findings}" in orch.fix_prompt
     assert orch.prompt_template is None
@@ -185,7 +208,7 @@ def test_validate_config_bad_mode():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         ralph=RalphConfig(mode="invalid"),
     )
     with pytest.raises(ValueError, match="ralph.mode"):
@@ -196,7 +219,7 @@ def test_validate_config_bad_sandbox_tool():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig()},
+        tools={"claude": ToolConfig(), "claude-interactive": ToolConfig()},
         ralph=RalphConfig(sandbox_tool="nonexistent"),
     )
     with pytest.raises(ValueError, match="ralph.sandbox_tool"):
@@ -207,7 +230,7 @@ def test_validate_config_bad_orchestrated_coder():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         orchestrated=OrchestratedConfig(coder="nonexistent"),
     )
     with pytest.raises(ValueError, match="orchestrated.coder"):
@@ -238,11 +261,27 @@ def test_load_config_string_false_boolean():
     tmp_path.unlink()
 
 
+def test_auto_allow_test_commands_from_file():
+    """auto_allow_test_commands should be parseable from YAML."""
+    data = {
+        "orchestrated": {
+            "auto_allow_test_commands": False,
+        },
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp_path = Path(f.name)
+
+    cfg = load_config(tmp_path)
+    assert cfg.orchestrated.auto_allow_test_commands is False
+    tmp_path.unlink()
+
+
 def test_validate_config_empty_test_command():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         orchestrated=OrchestratedConfig(
             run_tests_between_steps=True,
             test_commands=["pytest", ""],
@@ -255,7 +294,7 @@ def test_validate_config_empty_test_command():
 def test_validate_config_test_commands_not_checked_when_disabled():
     """Empty test_commands entries are fine when run_tests_between_steps is False."""
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         orchestrated=OrchestratedConfig(
             run_tests_between_steps=False,
             test_commands=[""],
@@ -330,9 +369,9 @@ def test_load_post_review_from_file():
 
 
 def test_prd_tool_default():
-    """Default prd_tool should be 'claude'."""
+    """Default prd_tool should be 'claude-interactive'."""
     cfg = load_config(None)
-    assert cfg.prd_tool == "claude"
+    assert cfg.prd_tool == "claude-interactive"
 
 
 def test_prd_tool_from_file():
@@ -351,11 +390,74 @@ def test_validate_config_bad_prd_tool():
     import pytest
 
     cfg = Config(
-        tools={"claude": ToolConfig(), "codex": ToolConfig()},
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
         prd_tool="nonexistent",
     )
     with pytest.raises(ValueError, match="prd_tool"):
         validate_config(cfg)
+
+
+# ── prd_json_tool tests ──────────────────────────────────────────────
+
+
+def test_prd_json_tool_default():
+    """Default prd_json_tool should be 'claude'."""
+    cfg = load_config(None)
+    assert cfg.prd_json_tool == "claude"
+
+
+def test_prd_json_tool_from_file():
+    """prd_json_tool should be loadable from YAML."""
+    data = {"prd_json_tool": "codex"}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp_path = Path(f.name)
+
+    cfg = load_config(tmp_path)
+    assert cfg.prd_json_tool == "codex"
+    tmp_path.unlink()
+
+
+def test_validate_config_bad_prd_json_tool():
+    import pytest
+
+    cfg = Config(
+        tools={"claude": ToolConfig(), "codex": ToolConfig(), "claude-interactive": ToolConfig()},
+        prd_json_tool="nonexistent",
+    )
+    with pytest.raises(ValueError, match="prd_json_tool"):
+        validate_config(cfg)
+
+
+def test_interactive_field_from_yaml():
+    """interactive and allowed_tools fields in tools YAML should be parsed correctly."""
+    data = {
+        "tools": {
+            "claude": {"command": "claude", "args": ["--print"]},
+            "claude-interactive": {
+                "command": "claude",
+                "args": ["{prompt}"],
+                "interactive": True,
+                "allowed_tools": ["Read", "Write", "Edit"],
+            },
+            "codex": {"command": "codex", "args": ["{prompt}"]},
+            "batch-tool": {
+                "command": "batch-cli",
+                "args": ["{prompt}"],
+            },
+        },
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        tmp_path = Path(f.name)
+
+    cfg = load_config(tmp_path)
+    assert cfg.tools["claude-interactive"].interactive is True
+    assert cfg.tools["claude-interactive"].allowed_tools == ["Read", "Write", "Edit"]
+    assert cfg.tools["batch-tool"].interactive is False
+    assert cfg.tools["batch-tool"].allowed_tools == []
+    assert cfg.tools["claude"].interactive is False
+    tmp_path.unlink()
 
 
 # ── deep merge tests ─────────────────────────────────────────────────
@@ -529,7 +631,8 @@ def test_format_effective_config():
     assert isinstance(output, str)
     parsed = yaml.safe_load(output)
     assert parsed["branch_prefix"] == "ralph/"
-    assert parsed["prd_tool"] == "claude"
+    assert parsed["prd_tool"] == "claude-interactive"
+    assert parsed["prd_json_tool"] == "claude"
     assert "claude" in parsed["tools"]
 
 
@@ -567,6 +670,47 @@ def test_provenance_cli_overrides(tmp_path):
     assert prov.sources["branch_prefix"] == "cli"
     assert cfg.branch_prefix == "cli/"
     tmp.unlink()
+
+
+def test_setup_cmd_prepends_to_post_worktree_create():
+    """--setup-cmd values are prepended to post_worktree_create hooks."""
+    cfg = load_config(None)
+    cfg.hooks["post_worktree_create"] = ["existing-hook"]
+
+    setup_cmd = ("uv sync", "make install")
+    existing = cfg.hooks.get("post_worktree_create", [])
+    cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
+
+    assert cfg.hooks["post_worktree_create"] == [
+        "uv sync",
+        "make install",
+        "existing-hook",
+    ]
+
+
+def test_setup_cmd_empty_leaves_hooks_unchanged():
+    """When no --setup-cmd is given, hooks are unchanged."""
+    cfg = load_config(None)
+    cfg.hooks["post_worktree_create"] = ["existing-hook"]
+
+    setup_cmd: tuple[str, ...] = ()
+    if setup_cmd:
+        existing = cfg.hooks.get("post_worktree_create", [])
+        cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
+
+    assert cfg.hooks["post_worktree_create"] == ["existing-hook"]
+
+
+def test_setup_cmd_creates_hook_when_none_configured():
+    """--setup-cmd works even when no post_worktree_create hooks exist."""
+    cfg = load_config(None)
+    assert "post_worktree_create" not in cfg.hooks
+
+    setup_cmd = ("uv sync --group dev",)
+    existing = cfg.hooks.get("post_worktree_create", [])
+    cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
+
+    assert cfg.hooks["post_worktree_create"] == ["uv sync --group dev"]
 
 
 def test_provenance_defaults_not_in_sources():
