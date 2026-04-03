@@ -114,13 +114,31 @@ def _get_head_sha(worktree_path: Path) -> str:
     return result.stdout.strip()
 
 
-def _backout_to(worktree_path: Path, sha: str) -> None:
+def _backout_to(
+    worktree_path: Path,
+    sha: str,
+    *,
+    restore_files: dict[Path, str] | None = None,
+) -> None:
+    """Hard-reset to *sha* and optionally restore scaffold files.
+
+    ``git reset --hard`` removes files that were staged after the target SHA
+    (e.g. ``scripts/ralph/`` scaffold written by ``_setup_worktree_files``).
+    Pass *restore_files* — a mapping of absolute paths to their content — to
+    re-create them after the reset.
+    """
     console.print(f"[yellow]  Backing out to {sha[:8]}...[/yellow]")
     subprocess.run(
         ["git", "reset", "--hard", sha],
         cwd=worktree_path,
         check=True,
     )
+    # Restore scaffold directory and base files destroyed by the hard reset.
+    _setup_worktree_files(worktree_path)
+    if restore_files:
+        for path, content in restore_files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
 
 
 def _run_test_commands(worktree_path: Path, commands: list[str]) -> bool:
@@ -387,6 +405,11 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
     if not prd_json.exists():
         raise FileNotFoundError(f"prd.json not found at {prd_json}")
 
+    # Save scaffold files so they survive git reset --hard during backout.
+    # _commit_if_dirty uses `git add -A` which stages these untracked files,
+    # so a hard reset to the pre-iteration SHA removes them.
+    saved_prd_json = prd_json.read_text()
+
     last_findings = ""
 
     for iteration in range(1, config.ralph.max_iterations + 1):
@@ -444,7 +467,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if result.returncode != 0:
                 console.print(f"  [red]✗ Coder process failed (exit {result.returncode})[/red]")
                 if orch.backout_on_failure and attempt < max_attempts:
-                    _backout_to(worktree_path, pre_sha)
+                    _backout_to(worktree_path, pre_sha, restore_files={prd_json: saved_prd_json})
                     continue
                 console.print("  [red]Infra failure — skipping review[/red]")
                 break
@@ -466,7 +489,9 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     console.print("  [yellow]Tests failed — treating as review failure[/yellow]")
                     tests_failed = True
                     if orch.backout_on_failure and attempt < max_attempts:
-                        _backout_to(worktree_path, pre_sha)
+                        _backout_to(
+                            worktree_path, pre_sha, restore_files={prd_json: saved_prd_json}
+                        )
                         continue
 
             # Review changes
@@ -491,7 +516,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if orch.backout_on_failure:
                 # PATH A: Backout and retry
                 if attempt < max_attempts:
-                    _backout_to(worktree_path, pre_sha)
+                    _backout_to(worktree_path, pre_sha, restore_files={prd_json: saved_prd_json})
                 else:
                     console.print(
                         f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
@@ -542,6 +567,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
         # Append to progress
         progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
         status = "passed" if iteration_passed else "failed"
         with open(progress_file, "a") as f:
             f.write(f"\n## Iteration {iteration} — {status}\n---\n")
