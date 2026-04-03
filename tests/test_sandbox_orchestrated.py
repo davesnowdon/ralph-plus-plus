@@ -1053,9 +1053,7 @@ class TestPreviousFindings:
                     max_severity="major",
                     minor_only=False,
                 )
-            return ReviewResult(
-                passed=True, findings="LGTM", max_severity=None, minor_only=True
-            )
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         with (
             patch(
@@ -1081,9 +1079,7 @@ class TestPreviousFindings:
         # CLAUDE.md should contain the review findings
         claude_md = worktree / "scripts" / "ralph" / "CLAUDE.md"
         content = claude_md.read_text()
-        assert findings_text in content, (
-            "Default CLAUDE.md should include review findings on retry"
-        )
+        assert findings_text in content, "Default CLAUDE.md should include review findings on retry"
         assert "RETRY" in content, "Should include retry header"
 
     def test_first_attempt_claude_md_has_no_findings(self, tmp_path):
@@ -1372,6 +1368,113 @@ class TestRetryPromptWrapping:
         content = iter_prompt.read_text()
         assert "RETRY 2/2" in content, "Retry prompt should have RETRY header"
         assert findings_text in content
+
+
+class TestCompleteSignalValidation:
+    """COMPLETE signal must be validated against prd.json story status."""
+
+    def test_complete_accepted_when_all_stories_pass(self, tmp_path):
+        """COMPLETE signal with all passes=true → returns True."""
+        worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+
+        import json
+
+        prd_data = {
+            "userStories": [
+                {"id": "US-001", "title": "Done", "passes": True},
+            ]
+        }
+        prd_json.write_text(json.dumps(prd_data))
+
+        config = _make_config(tmp_path, max_iterations=3, max_iteration_retries=0)
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            # Coder output contains COMPLETE signal
+            return _fake_subprocess_run(returncode=0, stdout="done\n<promise>COMPLETE</promise>\n")
+
+        with (
+            patch(
+                "ralph_pp.steps.sandbox.subprocess.run",
+                side_effect=mock_subprocess_run,
+            ),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._get_head_sha",
+                side_effect=_incrementing_sha(),
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is True
+
+    def test_complete_rejected_when_stories_incomplete(self, tmp_path):
+        """COMPLETE signal with passes=false → continues iterations."""
+        worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+
+        import json
+
+        prd_data = {
+            "userStories": [
+                {"id": "US-001", "title": "Done", "passes": True},
+                {"id": "US-002", "title": "Not done", "passes": False},
+            ]
+        }
+        prd_json.write_text(json.dumps(prd_data))
+
+        config = _make_config(tmp_path, max_iterations=2, max_iteration_retries=0)
+
+        coder_call_count = 0
+
+        def mock_subprocess_run(cmd, **kwargs):
+            nonlocal coder_call_count
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            coder_call_count += 1
+            # Coder always claims COMPLETE
+            return _fake_subprocess_run(returncode=0, stdout="done\n<promise>COMPLETE</promise>\n")
+
+        with (
+            patch(
+                "ralph_pp.steps.sandbox.subprocess.run",
+                side_effect=mock_subprocess_run,
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._review_iteration",
+                return_value=ReviewResult(
+                    passed=True,
+                    findings="LGTM",
+                    max_severity=None,
+                    minor_only=True,
+                ),
+            ),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._get_head_sha",
+                side_effect=_incrementing_sha(),
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # Should have run multiple iterations, not stopped at 1
+        assert coder_call_count == 2, (
+            "Should continue iterating when COMPLETE signal but stories incomplete"
+        )
 
 
 class TestIdleDetection:

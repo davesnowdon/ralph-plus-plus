@@ -97,8 +97,20 @@ normally (another iteration will pick up the next story).
 COMPLETE_SIGNAL = "<promise>COMPLETE</promise>"
 
 
+BASE_SHA_FILE = "scripts/ralph/.base-sha"
+
+
 def run_sandbox(worktree_path: Path, config: Config) -> bool:
-    """Run the Ralph loop. Dispatches to delegated or orchestrated mode."""
+    """Run the Ralph loop. Dispatches to delegated or orchestrated mode.
+
+    Saves the pre-run HEAD SHA to ``scripts/ralph/.base-sha`` so that the
+    post-run review can diff against the starting point.
+    """
+    base_sha = get_head_sha(worktree_path)
+    base_sha_path = worktree_path / BASE_SHA_FILE
+    base_sha_path.parent.mkdir(parents=True, exist_ok=True)
+    base_sha_path.write_text(base_sha)
+
     if config.ralph.mode == "orchestrated":
         return _run_orchestrated(worktree_path, config)
     return _run_delegated(worktree_path, config)
@@ -548,10 +560,19 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 console.print("  [red]Infra failure — skipping review[/red]")
                 break
 
-            # Check for completion signal
+            # Check for completion signal — verify against prd.json
             if COMPLETE_SIGNAL in combined_output:
-                console.print("[green]Ralph signaled COMPLETE[/green]")
-                return True
+                _commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
+                story_status = read_story_status(prd_json)
+                if all(story_status.values()):
+                    console.print("[green]Ralph signaled COMPLETE[/green]")
+                    return True
+                incomplete = [sid for sid, p in story_status.items() if not p]
+                console.print(
+                    f"[yellow]Ralph signaled COMPLETE but {len(incomplete)} stories "
+                    f"still have passes=false: {', '.join(sorted(incomplete))} — "
+                    "continuing iterations[/yellow]"
+                )
 
             # Force-commit any uncommitted coder changes
             _commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")

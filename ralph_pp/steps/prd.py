@@ -218,7 +218,10 @@ def convert_prd_to_json(prd_file: Path, worktree_path: Path, config: Config) -> 
         "   - Correct: schema → backend logic → UI components → dashboards\n\n"
         "3. **Acceptance criteria**: Must be verifiable, not vague.\n"
         "   - Good: \"Add status column with default 'pending'\"\n"
-        '   - Bad: "Works correctly", "Good UX"\n\n'
+        '   - Bad: "Works correctly", "Good UX"\n'
+        "   - For validation requirements ('X must be Y'), include both:\n"
+        "     - Positive: 'X works correctly when Y'\n"
+        "     - Negative: 'X raises [Error] when not Y'\n\n"
         '4. **Always include** "Typecheck passes" as final criterion in every story.\n\n'
         '5. **For UI stories**, also include "Verify in browser using dev-browser skill".\n\n'
         "6. **IDs**: Sequential (US-001, US-002, etc.)\n\n"

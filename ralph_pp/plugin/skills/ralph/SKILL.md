@@ -97,6 +97,14 @@ Each criterion must be something Ralph can CHECK, not something vague.
 - "Good UX"
 - "Handles edge cases"
 
+### For validation requirements, include both positive and negative paths:
+- "store_memory raises ValueError if content is empty"
+- "update_last_access raises ValueError for naive (non-timezone-aware) datetimes"
+
+If the PRD says "X must be Y", the acceptance criteria should include both:
+1. "X works correctly when Y" (positive path)
+2. "X raises [Error] when not Y" (negative path)
+
 ### Always include as final criterion:
 ```
 "Typecheck passes"

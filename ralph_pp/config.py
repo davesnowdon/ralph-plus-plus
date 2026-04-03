@@ -75,6 +75,7 @@ Do NOT evaluate against stories that are not listed here.
 
 {stories_under_review}
 {incomplete_stories_note}
+{diff}
 {previous_findings}
 Review whether the code fully satisfies every listed story and its acceptance criteria.
 

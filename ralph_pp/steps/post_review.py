@@ -10,7 +10,7 @@ from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
 from ..tools import make_tool, make_tool_with_permissions
 from ._git import format_test_results, get_diff, get_head_sha, run_test_commands_with_output
 from .prd import MaxCyclesAbort, prompt_max_cycles
-from .sandbox import format_all_completed
+from .sandbox import BASE_SHA_FILE, format_all_completed
 
 console = Console()
 
@@ -53,6 +53,15 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
         )
     else:
         incomplete_note = ""
+
+    # Compute full diff from the pre-run baseline (saved by run_sandbox)
+    base_sha_path = worktree_path / BASE_SHA_FILE
+    if base_sha_path.exists():
+        base_sha = base_sha_path.read_text().strip()
+        full_diff = get_diff(worktree_path, base_sha)
+        diff_text = f"\n## Git diff (all changes since run start)\n\n{full_diff}\n"
+    else:
+        diff_text = ""
 
     total_cycles = 0
     previous_findings: str = ""
@@ -100,6 +109,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
             review_prompt = (
                 review_cfg.reviewer_prompt.replace("{stories_under_review}", stories_text)
                 .replace("{incomplete_stories_note}", incomplete_note)
+                .replace("{diff}", diff_text)
                 .replace("{previous_findings}", context)
                 .replace("{test_commands_guidance}", guidance)
                 .replace("{test_results}", test_results_text)
