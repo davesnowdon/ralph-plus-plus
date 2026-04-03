@@ -7,10 +7,12 @@ Supports two modes:
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 
@@ -207,6 +209,57 @@ def _test_commands_guidance(orch: OrchestratedConfig) -> str:
     return TEST_COMMANDS_GUIDANCE.format(commands=cmd_list)
 
 
+# ── PRD helpers ────────────────────────────────────────────────────────
+
+
+class PrdParseError(RuntimeError):
+    """Raised when prd.json cannot be parsed or is structurally invalid."""
+
+
+def load_prd(prd_json: Path) -> dict[str, Any]:
+    """Load and validate prd.json structure. Raises PrdParseError on failure."""
+    try:
+        data: dict[str, Any] = json.loads(prd_json.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        raise PrdParseError(f"Failed to parse {prd_json}: {e}") from e
+    if not isinstance(data, dict) or "userStories" not in data:
+        raise PrdParseError(f"{prd_json} is missing 'userStories' key")
+    return data
+
+
+def read_story_status(prd_json: Path) -> dict[str, bool]:
+    """Read prd.json and return ``{story_id: passes}`` mapping."""
+    data = load_prd(prd_json)
+    return {s["id"]: bool(s.get("passes", False)) for s in data["userStories"]}
+
+
+def format_stories(prd_json: Path, story_ids: set[str]) -> str:
+    """Extract and format specific stories from prd.json for embedding in prompts."""
+    data = load_prd(prd_json)
+    stories = [s for s in data["userStories"] if s["id"] in story_ids]
+    parts: list[str] = []
+    for s in stories:
+        criteria = "\n".join(f"  - {c}" for c in s.get("acceptanceCriteria", []))
+        parts.append(
+            f"### {s['id']}: {s.get('title', '(no title)')}\n"
+            f"{s.get('description', '')}\n\n"
+            f"Acceptance criteria:\n{criteria}"
+        )
+    return "\n\n".join(parts)
+
+
+def format_all_completed(prd_json: Path) -> tuple[str, list[str]]:
+    """Format all completed stories and return IDs of incomplete ones.
+
+    Returns ``(formatted_text, incomplete_ids)``.
+    """
+    data = load_prd(prd_json)
+    completed_ids = {s["id"] for s in data["userStories"] if s.get("passes")}
+    incomplete_ids = [s["id"] for s in data["userStories"] if not s.get("passes")]
+    text = format_stories(prd_json, completed_ids)
+    return text, incomplete_ids
+
+
 _RETRY_HEADER = """\
 ⚠ RETRY {attempt}/{max_attempts}
 Your previous attempt was REJECTED by the reviewer.
@@ -306,11 +359,11 @@ def _review_iteration(
     config: Config,
     previous_findings: str = "",
     fixer_diff: str = "",
+    stories_under_review: str = "",
 ) -> ReviewResult:
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
     reviewer = make_tool(orch.reviewer, config)
-    prd_file = str(worktree_path / "scripts" / "ralph" / "prd.json")
 
     if previous_findings:
         context = (
@@ -331,7 +384,7 @@ def _review_iteration(
     review_prompt = _render_prompt(
         orch.review_prompt,
         diff=diff,
-        prd_file=prd_file,
+        stories_under_review=stories_under_review,
         previous_findings=context,
         test_commands_guidance=_test_commands_guidance(orch),
     )
@@ -369,11 +422,15 @@ def _run_fixer_in_sandbox(
     findings: str,
     worktree_path: Path,
     config: Config,
+    stories_under_review: str = "",
 ) -> subprocess.CompletedProcess[str]:
     """Invoke the fixer agent inside the sandbox with the fix prompt."""
     orch = config.orchestrated
-    prd_file = str(worktree_path / "scripts" / "ralph" / "prd.json")
-    fix_prompt = _render_prompt(orch.fix_prompt, findings=findings, prd_file=prd_file)
+    fix_prompt = _render_prompt(
+        orch.fix_prompt,
+        findings=findings,
+        stories_under_review=stories_under_review,
+    )
 
     # Write fix prompt to a temp file in the worktree so the session runner can read it
     prompt_file = worktree_path / "scripts" / "ralph" / ".fix-prompt.md"
@@ -423,9 +480,15 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
     last_findings = ""
     consecutive_idle = 0
+    prev_story_status = read_story_status(prd_json)
+    total_stories = len(prev_story_status)
 
     for iteration in range(1, config.ralph.max_iterations + 1):
-        console.print(f"\n[bold]═══ Iteration {iteration}/{config.ralph.max_iterations} ═══[/bold]")
+        completed = sum(1 for v in prev_story_status.values() if v)
+        console.print(
+            f"\n[bold]═══ Iteration {iteration}/{config.ralph.max_iterations} "
+            f"({completed}/{total_stories} stories done) ═══[/bold]"
+        )
 
         pre_sha = _get_head_sha(worktree_path)
 
@@ -510,6 +573,18 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             else:
                 consecutive_idle = 0
 
+            # Detect which stories the coder completed this iteration
+            curr_story_status = read_story_status(prd_json)
+            newly_completed = {
+                sid
+                for sid, passes in curr_story_status.items()
+                if passes and not prev_story_status.get(sid, False)
+            }
+            if newly_completed:
+                console.print(
+                    f"  [green]Stories completed: {', '.join(sorted(newly_completed))}[/green]"
+                )
+
             # Run tests/linter (optional)
             tests_failed = False
             if orch.run_tests_between_steps and orch.test_commands:
@@ -524,10 +599,23 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         )
                         continue
 
-            # Review changes
+            # Review changes — scope to newly-completed stories only
+            stories_text = (
+                format_stories(prd_json, newly_completed)
+                if newly_completed
+                else format_stories(
+                    prd_json,
+                    {sid for sid, p in curr_story_status.items() if not p},
+                )
+            )
             diff = _get_diff(worktree_path, pre_sha)
             review = _review_iteration(
-                iteration, diff, worktree_path, config, previous_findings=last_findings
+                iteration,
+                diff,
+                worktree_path,
+                config,
+                previous_findings=last_findings,
+                stories_under_review=stories_text,
             )
             last_findings = review.findings
 
@@ -559,7 +647,9 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]"
                     )
                     pre_fix_sha = _get_head_sha(worktree_path)
-                    fixer_result = _run_fixer_in_sandbox(review.findings, worktree_path, config)
+                    fixer_result = _run_fixer_in_sandbox(
+                        review.findings, worktree_path, config, stories_text
+                    )
                     if fixer_result.returncode != 0:
                         console.print(
                             f"  [red]✗ Fixer process failed (exit {fixer_result.returncode})[/red]"
@@ -589,6 +679,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         config,
                         previous_findings=review.findings,
                         fixer_diff=fix_diff,
+                        stories_under_review=stories_text,
                     )
                     last_findings = review.findings
                     if review.passed:
@@ -601,6 +692,9 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     )
                     return False
                 break  # In fix-in-place mode we don't retry the coder, only the fixer
+
+        # Update story status for next iteration
+        prev_story_status = read_story_status(prd_json)
 
         # Append to progress (skip idle iterations — the coder writes its own
         # detailed entries via the orchestrated prompt)
