@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
@@ -15,7 +16,15 @@ from .sandbox import BASE_SHA_FILE, format_all_completed
 console = Console()
 
 
-def post_review_loop(worktree_path: Path, config: Config) -> None:
+@dataclass
+class PostReviewResult:
+    """Outcome of the post-run review loop."""
+
+    outcome: str  # "lgtm", "accepted", "skipped"
+    cycles: int  # total review cycles run
+
+
+def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
     """
     After the Ralph sandbox completes, run a full review of the implementation
     against prd.json. Iteratively fix issues until LGTM or max_cycles reached.
@@ -26,7 +35,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
     review_cfg: PostReviewConfig = config.post_review
     if not review_cfg.enabled:
         console.print("[dim]Post-run review disabled — skipping[/dim]")
-        return
+        return PostReviewResult(outcome="skipped", cycles=0)
 
     console.print("[bold cyan]\n── Step: Post-Run Review Loop ──[/bold cyan]")
     if config.orchestrated.auto_allow_test_commands and config.orchestrated.test_commands:
@@ -122,7 +131,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
 
             if result.is_lgtm:
                 console.print("[green]✓ Post-run review passed (LGTM)[/green]")
-                return
+                return PostReviewResult(outcome="lgtm", cycles=total_cycles)
 
             previous_findings = result.output
             console.print(
@@ -149,6 +158,6 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
             raise MaxCyclesAbort
         if action == "continue":
             console.print("[yellow]Accepting implementation without reviewer approval[/yellow]")
-            return
+            return PostReviewResult(outcome="accepted", cycles=total_cycles)
         # action == "retry" → loop again
         console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")
