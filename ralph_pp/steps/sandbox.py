@@ -100,11 +100,27 @@ COMPLETE_SIGNAL = "<promise>COMPLETE</promise>"
 BASE_SHA_FILE = "scripts/ralph/.base-sha"
 
 
-def run_sandbox(worktree_path: Path, config: Config) -> bool:
+@dataclass
+class RunSummary:
+    """Summary statistics from a sandbox run."""
+
+    mode: str  # e.g. "orchestrated (backout)", "delegated"
+    sandbox_ok: bool  # whether the sandbox signaled success
+    iterations: int  # total iterations run (0 for delegated)
+    stories_completed: int
+    stories_total: int
+    base_sha: str
+    final_sha: str
+    retries: int  # total backout retries or fix cycles
+
+
+def run_sandbox(worktree_path: Path, config: Config) -> RunSummary:
     """Run the Ralph loop. Dispatches to delegated or orchestrated mode.
 
     Saves the pre-run HEAD SHA to ``scripts/ralph/.base-sha`` so that the
     post-run review can diff against the starting point.
+
+    Returns a :class:`RunSummary` with statistics about the run.
     """
     base_sha = get_head_sha(worktree_path)
     base_sha_path = worktree_path / BASE_SHA_FILE
@@ -112,8 +128,44 @@ def run_sandbox(worktree_path: Path, config: Config) -> bool:
     base_sha_path.write_text(base_sha)
 
     if config.ralph.mode == "orchestrated":
-        return _run_orchestrated(worktree_path, config)
-    return _run_delegated(worktree_path, config)
+        success = _run_orchestrated(worktree_path, config)
+    else:
+        success = _run_delegated(worktree_path, config)
+
+    # Build summary from post-run state
+    prd_json = worktree_path / "scripts" / "ralph" / "prd.json"
+    story_status = read_story_status(prd_json) if prd_json.exists() else {}
+    completed = sum(1 for v in story_status.values() if v)
+
+    orch = config.orchestrated
+    if config.ralph.mode == "orchestrated":
+        strategy = "backout" if orch.backout_on_failure else "fixup"
+        mode = f"orchestrated ({strategy})"
+    else:
+        mode = "delegated"
+
+    # Read iteration/retry counters written by _run_orchestrated
+    counters_path = worktree_path / "scripts" / "ralph" / ".run-counters"
+    iterations = 0
+    retries = 0
+    if counters_path.exists():
+        for line in counters_path.read_text().splitlines():
+            key, _, val = line.partition("=")
+            if key == "iterations":
+                iterations = int(val)
+            elif key == "retries":
+                retries = int(val)
+
+    return RunSummary(
+        mode=mode,
+        sandbox_ok=success,
+        iterations=iterations,
+        stories_completed=completed,
+        stories_total=len(story_status),
+        base_sha=base_sha,
+        final_sha=get_head_sha(worktree_path),
+        retries=retries,
+    )
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -481,8 +533,14 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
 
     last_findings = ""
     consecutive_idle = 0
+    total_retries = 0
     prev_story_status = read_story_status(prd_json)
     total_stories = len(prev_story_status)
+
+    def _save_counters(iters: int) -> None:
+        """Persist iteration/retry counters for RunSummary."""
+        counters = worktree_path / "scripts" / "ralph" / ".run-counters"
+        counters.write_text(f"iterations={iters}\nretries={total_retries}\n")
 
     for iteration in range(1, config.ralph.max_iterations + 1):
         completed = sum(1 for v in prev_story_status.values() if v)
@@ -570,6 +628,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 story_status = read_story_status(prd_json)
                 if all(story_status.values()):
                     console.print("[green]Ralph signaled COMPLETE[/green]")
+                    _save_counters(iteration)
                     return True
                 incomplete = [sid for sid, p in story_status.items() if not p]
                 console.print(
@@ -590,6 +649,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         f"[green]No changes for {consecutive_idle} consecutive iterations "
                         "— treating as complete[/green]"
                     )
+                    _save_counters(iteration)
                     return True
                 console.print(
                     f"  [dim]No changes this iteration "
@@ -665,15 +725,18 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
             if orch.backout_on_failure:
                 # PATH A: Backout and retry
                 if attempt < max_attempts:
+                    total_retries += 1
                     _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                 else:
                     console.print(
                         f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
                     )
+                    _save_counters(iteration)
                     return False
             else:
                 # PATH B: Invoke fixer to fix in-place
                 for fix_cycle in range(1, orch.max_iteration_retries + 1):
+                    total_retries += 1
                     console.print(
                         f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]"
                     )
@@ -729,6 +792,7 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     console.print(
                         f"  [red]✗ Fix cycles exhausted for iteration {iteration} — aborting[/red]"
                     )
+                    _save_counters(iteration)
                     return False
                 break  # In fix-in-place mode we don't retry the coder, only the fixer
 
@@ -748,4 +812,5 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
         f"[yellow]Reached max iterations ({config.ralph.max_iterations}) "
         "without completion signal[/yellow]"
     )
+    _save_counters(config.ralph.max_iterations)
     return False
