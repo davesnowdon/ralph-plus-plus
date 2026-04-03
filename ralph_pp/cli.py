@@ -115,8 +115,10 @@ _sandbox_dir_option = click.option(
 @click.option(
     "--feature",
     "-f",
-    required=True,
-    help="Feature description (used to name the branch and generate the PRD).",
+    required=False,
+    default=None,
+    help="Feature description (used to name the branch and generate the PRD). "
+    "Derived from --prd-file filename when omitted.",
 )
 @_repo_option
 @_config_option
@@ -184,7 +186,7 @@ _sandbox_dir_option = click.option(
     help="Print what would be done without executing anything.",
 )
 def run(
-    feature: str,
+    feature: str | None,
     repo: Path | None,
     config_file: Path | None,
     claude_config: Path | None,
@@ -202,6 +204,13 @@ def run(
     """Run the full Ralph agentic coding workflow."""
     if prd_only and prd_file:
         raise click.UsageError("--prd-only and --prd-file are mutually exclusive.")
+
+    # Derive feature from PRD filename when not explicitly provided.
+    if feature is None and prd_file is not None:
+        stem = prd_file.stem  # e.g. "prd-my-feature"
+        feature = stem.removeprefix("prd-") if stem.startswith("prd-") else stem
+    if feature is None:
+        raise click.UsageError("--feature is required (or provide --prd-file to derive it).")
 
     config_paths, repo = _resolve_config(config_file, repo)
     overrides = _build_overrides(repo, claude_config, codex_config, sandbox_dir)
