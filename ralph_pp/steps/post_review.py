@@ -8,6 +8,7 @@ from rich.console import Console
 
 from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
 from ..tools import make_tool, make_tool_with_permissions
+from ._git import get_diff, get_head_sha, run_test_commands_with_output
 from .prd import MaxCyclesAbort, prompt_max_cycles
 
 console = Console()
@@ -27,7 +28,12 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
         return
 
     console.print("[bold cyan]\n── Step: Post-Run Review Loop ──[/bold cyan]")
-    reviewer = make_tool(review_cfg.reviewer, config)
+    if config.orchestrated.auto_allow_test_commands and config.orchestrated.test_commands:
+        reviewer = make_tool_with_permissions(
+            review_cfg.reviewer, config, config.orchestrated.test_commands
+        )
+    else:
+        reviewer = make_tool(review_cfg.reviewer, config)
     if config.orchestrated.auto_allow_test_commands and config.orchestrated.test_commands:
         fixer = make_tool_with_permissions(
             review_cfg.fixer, config, config.orchestrated.test_commands
@@ -39,6 +45,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
 
     total_cycles = 0
     previous_findings: str = ""
+    last_fixer_diff: str = ""
     while True:
         for cycle in range(1, review_cfg.max_cycles + 1):
             total_cycles += 1
@@ -55,6 +62,11 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
                     "that have been resolved:\n\n"
                     f"{previous_findings}\n"
                 )
+                if last_fixer_diff:
+                    context += (
+                        "\nThe fixer made the following changes to address those findings:\n\n"
+                        f"{last_fixer_diff}\n"
+                    )
             else:
                 context = ""
 
@@ -65,10 +77,26 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
             else:
                 guidance = ""
 
+            # Pre-run tests so the reviewer gets concrete results
+            test_results_text = ""
+            if test_cmds:
+                console.print("  [dim]Running test commands before review...[/dim]")
+                tests_ok, test_output = run_test_commands_with_output(worktree_path, test_cmds)
+                status_str = "PASSED" if tests_ok else "FAILED"
+                console.print(f"  [dim]Tests {status_str}[/dim]")
+                test_results_text = (
+                    f"\nThe following test/CI results were obtained before this review "
+                    f"({status_str}):\n\n{test_output}\n\n"
+                    "Use these results as a starting point. You may re-run the configured "
+                    "CI commands if you need to verify specific fixes, but do NOT run bare "
+                    "pytest or other tools.\n"
+                )
+
             review_prompt = (
                 review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_json))
                 .replace("{previous_findings}", context)
                 .replace("{test_commands_guidance}", guidance)
+                .replace("{test_results}", test_results_text)
             )
             result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
             if not result.success:
@@ -84,6 +112,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
             console.print(
                 f"[yellow]Issues found in cycle {total_cycles} — running fix pass...[/yellow]"
             )
+            pre_fix_sha = get_head_sha(worktree_path)
             fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_json)).replace(
                 "{findings}", result.output
             )
@@ -93,6 +122,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> None:
                     f"Post-run fixer failed (exit {fix_result.exit_code}): "
                     f"{fix_result.output[:200]}"
                 )
+            last_fixer_diff = get_diff(worktree_path, pre_fix_sha)
 
         action = prompt_max_cycles(
             "Post-run",

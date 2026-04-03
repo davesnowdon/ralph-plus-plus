@@ -99,7 +99,8 @@ For each finding include:
 
 Be specific. Do not give vague style feedback unless it affects
 correctness or maintainability materially.
-{test_commands_guidance}"""
+{test_commands_guidance}
+{test_results}"""
 
 _POST_FIXER_PROMPT = """\
 The following issues were found in the final implementation against {prd_file}:
@@ -224,6 +225,7 @@ class OrchestratedConfig:
     backout_on_failure: bool = True
     backout_severity_threshold: str = "major"  # minor | major | critical
     auto_allow_test_commands: bool = True
+    max_idle_iterations: int = 2
     review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
     fix_prompt: str = _ORCHESTRATED_FIX_PROMPT
     prompt_template: str | None = None

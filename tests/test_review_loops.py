@@ -80,7 +80,11 @@ class TestPrdReviewLoopToolFailures:
         prd_file.parent.mkdir(parents=True)
         prd_file.write_text("# PRD")
 
-        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("Issues found here")
             fixer_mock = MagicMock()
@@ -103,6 +107,8 @@ class TestPrdReviewLoopMaxCycles:
         with (
             patch("ralph_pp.steps.prd.make_tool") as mock_make,
             patch("ralph_pp.steps.prd.prompt_max_cycles", return_value="quit"),
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
         ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
@@ -124,6 +130,8 @@ class TestPrdReviewLoopMaxCycles:
         with (
             patch("ralph_pp.steps.prd.make_tool") as mock_make,
             patch("ralph_pp.steps.prd.prompt_max_cycles", return_value="continue"),
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
         ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
@@ -150,6 +158,8 @@ class TestPrdReviewLoopMaxCycles:
                 "ralph_pp.steps.prd.prompt_max_cycles",
                 side_effect=lambda *a: next(prompt_responses),
             ),
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
         ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
@@ -174,6 +184,8 @@ class TestPrdReviewLoopMaxCycles:
         with (
             patch("ralph_pp.steps.prd.make_tool") as mock_make,
             patch("ralph_pp.steps.prd.prompt_max_cycles", return_value="retry"),
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
         ):
             reviewer_mock = MagicMock()
             # First call: issues, second call: LGTM
@@ -200,7 +212,11 @@ class TestPrdReviewPreviousFindings:
         prd_file.parent.mkdir(parents=True)
         prd_file.write_text("# PRD")
 
-        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.side_effect = [
                 _ok_result("1. severity: major\nproblem: ordering unclear"),
@@ -249,12 +265,24 @@ class TestPostReviewLoopToolFailures:
         prd_json.parent.mkdir(parents=True)
         prd_json.write_text("{}")
 
-        with patch("ralph_pp.steps.post_review.make_tool") as mock_make:
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_aug,
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
+        ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("Issues found")
             fixer_mock = MagicMock()
             fixer_mock.run.return_value = _fail_result()
             mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+            mock_make_aug.side_effect = lambda name, cfg, cmds: (
                 reviewer_mock if name == "codex" else fixer_mock
             )
 
@@ -271,13 +299,23 @@ class TestPostReviewLoopMaxCycles:
 
         with (
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_aug,
             patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
         ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
             fixer_mock = MagicMock()
             fixer_mock.run.return_value = _ok_result("fixed")
             mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+            mock_make_aug.side_effect = lambda name, cfg, cmds: (
                 reviewer_mock if name == "codex" else fixer_mock
             )
 
@@ -292,13 +330,23 @@ class TestPostReviewLoopMaxCycles:
 
         with (
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_aug,
             patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="continue"),
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
         ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
             fixer_mock = MagicMock()
             fixer_mock.run.return_value = _ok_result("fixed")
             mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+            mock_make_aug.side_effect = lambda name, cfg, cmds: (
                 reviewer_mock if name == "codex" else fixer_mock
             )
 
@@ -328,7 +376,7 @@ class TestPromptMaxCycles:
 
 class TestPostReviewFixer:
     def test_fixer_gets_test_command_permissions(self, tmp_path):
-        """When test_commands are configured, the fixer should get augmented Bash permissions."""
+        """When test_commands are configured, both reviewer and fixer get augmented permissions."""
         from ralph_pp.config import OrchestratedConfig
 
         config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=1))
@@ -344,24 +392,30 @@ class TestPostReviewFixer:
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
             patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_augmented,
             patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
         ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
             fixer_mock = MagicMock()
             fixer_mock.run.return_value = _ok_result("fixed")
-            mock_make.return_value = reviewer_mock
-            mock_make_augmented.return_value = fixer_mock
+            mock_make_augmented.side_effect = lambda name, cfg, cmds: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
 
             with pytest.raises(MaxCyclesAbort):
                 post_review_loop(tmp_path, config)
 
-        # Reviewer uses plain make_tool
-        mock_make.assert_called_once_with("codex", config)
-        # Fixer uses augmented make_tool_with_permissions
-        mock_make_augmented.assert_called_once_with("claude", config, ["hatch run ci", "pytest"])
+        # Both reviewer and fixer use augmented make_tool_with_permissions
+        assert mock_make_augmented.call_count == 2
+        mock_make.assert_not_called()
 
     def test_fixer_not_augmented_when_disabled(self, tmp_path):
-        """When auto_allow_test_commands is False, the fixer uses plain make_tool."""
+        """When auto_allow_test_commands is False, both use plain make_tool."""
         from ralph_pp.config import OrchestratedConfig
 
         config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=1))
@@ -377,6 +431,12 @@ class TestPostReviewFixer:
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
             patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_augmented,
             patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
         ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
@@ -415,6 +475,12 @@ class TestPostReviewTestCommandsGuidance:
             patch("ralph_pp.steps.post_review.make_tool") as mock_make,
             patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_aug,
             patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
         ):
             reviewer_mock = MagicMock()
             reviewer_mock.run.return_value = _ok_result("1. severity: minor\nfoo")
@@ -423,7 +489,9 @@ class TestPostReviewTestCommandsGuidance:
             mock_make.side_effect = lambda name, cfg: (
                 reviewer_mock if name == "codex" else fixer_mock
             )
-            mock_make_aug.return_value = fixer_mock
+            mock_make_aug.side_effect = lambda name, cfg, cmds: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
 
             with pytest.raises(MaxCyclesAbort):
                 post_review_loop(tmp_path, config)

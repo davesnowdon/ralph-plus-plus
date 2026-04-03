@@ -11,6 +11,7 @@ from rich.console import Console
 
 from ..config import Config, PrdReviewConfig
 from ..tools import make_tool
+from ._git import get_diff, get_head_sha
 
 console = Console()
 
@@ -111,6 +112,7 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
 
     total_cycles = 0
     previous_findings: str = ""
+    last_fixer_diff: str = ""
     while True:
         for cycle in range(1, review_cfg.max_cycles + 1):
             total_cycles += 1
@@ -127,6 +129,11 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
                     "that have been resolved:\n\n"
                     f"{previous_findings}\n"
                 )
+                if last_fixer_diff:
+                    context += (
+                        "\nThe fixer made the following changes to address those findings:\n\n"
+                        f"{last_fixer_diff}\n"
+                    )
             else:
                 context = ""
 
@@ -147,6 +154,7 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
             console.print(
                 f"[yellow]Issues found in cycle {total_cycles} — running fix pass...[/yellow]"
             )
+            pre_fix_sha = get_head_sha(worktree_path)
             fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_file)).replace(
                 "{findings}", result.output
             )
@@ -155,6 +163,7 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
                 raise RuntimeError(
                     f"PRD fixer failed (exit {fix_result.exit_code}): {fix_result.output[:200]}"
                 )
+            last_fixer_diff = get_diff(worktree_path, pre_fix_sha)
 
         action = prompt_max_cycles("PRD", review_cfg.max_cycles)
         if action == "quit":
