@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from rich.console import Console
@@ -12,7 +13,12 @@ from .config import Config
 from .hooks import run_hooks
 from .skills import ensure_prd_skills
 from .steps.post_review import post_review_loop
-from .steps.prd import convert_prd_to_json, generate_prd, review_prd_loop
+from .steps.prd import (
+    convert_prd_to_json,
+    feature_to_slug,
+    generate_prd,
+    review_prd_loop,
+)
 from .steps.sandbox import run_sandbox
 from .steps.worktree import cleanup_git_config, create_worktree
 
@@ -31,6 +37,8 @@ class Orchestrator:
         self,
         skip_prd_review: bool = False,
         skip_post_review: bool = False,
+        prd_only: bool = False,
+        prd_file: Path | None = None,
     ) -> None:
         title = "ralph++\nFeature: " + self.feature
         console.print(Panel.fit(title, border_style="bright_blue"))
@@ -40,8 +48,14 @@ class Orchestrator:
             return
 
         try:
+            if prd_only:
+                self._step_prd_only(skip_prd_review)
+                return
             self._step_worktree()
-            self._step_prd(skip_prd_review)
+            if prd_file is not None:
+                self._step_prd_from_file(prd_file)
+            else:
+                self._step_prd(skip_prd_review)
             self._step_sandbox()
             if not skip_post_review:
                 self._step_post_review()
@@ -65,6 +79,33 @@ class Orchestrator:
         console.print(Rule("[bold]1 · Worktree[/bold]"))
         self.worktree_path, self.branch = create_worktree(self.feature, self.config)
         run_hooks("post_worktree_create", self.config.hooks, self.worktree_path)
+
+    def _step_prd_only(self, skip_review: bool) -> None:
+        """Generate (and optionally review) the text PRD, then stop."""
+        base = self.config.repo_path
+        console.print(Rule("[bold]PRD Only[/bold]"))
+        ensure_prd_skills(self.config, base)
+        run_hooks("pre_prd_generate", self.config.hooks, base)
+        prd_file = generate_prd(self.feature, base, self.config)
+        run_hooks("post_prd_generate", self.config.hooks, base)
+        if not skip_review:
+            review_prd_loop(prd_file, base, self.config)
+
+        console.print(Rule(style="green"))
+        console.print(Panel.fit(prd_file.read_text(), title="PRD", border_style="cyan"))
+        summary = "✓ PRD generated!\nFile: " + str(prd_file)
+        console.print(Panel.fit(summary, border_style="green"))
+
+    def _step_prd_from_file(self, prd_file: Path) -> None:
+        """Copy an existing text PRD into the worktree and convert to JSON."""
+        assert self.worktree_path is not None
+        console.print(Rule("[bold]2 · PRD (from file)[/bold]"))
+        slug = feature_to_slug(self.feature)
+        dest = self.worktree_path / "tasks" / f"prd-{slug}.md"
+        dest.parent.mkdir(exist_ok=True)
+        shutil.copy2(prd_file, dest)
+        console.print(f"[green]✓ PRD copied:[/green] {prd_file} → {dest}")
+        convert_prd_to_json(dest, self.worktree_path, self.config)
 
     def _step_prd(self, skip_review: bool) -> None:
         assert self.worktree_path is not None

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ralph_pp.steps.prd import _feature_to_slug, convert_prd_to_json, generate_prd
+from ralph_pp.steps.prd import convert_prd_to_json, feature_to_slug, generate_prd
 from ralph_pp.tools.base import ToolResult
 
 
@@ -26,17 +26,17 @@ def _make_config():
 
 class TestFeatureToSlug:
     def test_simple(self):
-        assert _feature_to_slug("test feature") == "test-feature"
+        assert feature_to_slug("test feature") == "test-feature"
 
     def test_mixed_case_and_punctuation(self):
-        result = _feature_to_slug("Freeze Canonical Memory Contracts")
+        result = feature_to_slug("Freeze Canonical Memory Contracts")
         assert result == "freeze-canonical-memory-contracts"
 
     def test_special_characters(self):
-        assert _feature_to_slug("add foo/bar support!") == "add-foobar-support"
+        assert feature_to_slug("add foo/bar support!") == "add-foobar-support"
 
     def test_multiple_spaces_and_dashes(self):
-        assert _feature_to_slug("  lots   of   spaces  ") == "lots-of-spaces"
+        assert feature_to_slug("  lots   of   spaces  ") == "lots-of-spaces"
 
 
 class TestGeneratePrd:

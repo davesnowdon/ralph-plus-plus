@@ -48,7 +48,7 @@ def prompt_max_cycles(
     return {"1": "quit", "2": "retry", "3": "continue"}[choice]
 
 
-def _feature_to_slug(feature: str) -> str:
+def feature_to_slug(feature: str) -> str:
     """Convert a feature description to a kebab-case slug for filenames."""
     slug = feature.lower()
     slug = re.sub(r"[^a-z0-9\s-]", "", slug)
@@ -63,7 +63,7 @@ def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
     Returns the path to the generated PRD markdown file.
     """
     console.print("[bold cyan]\n── Step: Generate PRD ──[/bold cyan]")
-    slug = _feature_to_slug(feature)
+    slug = feature_to_slug(feature)
     prd_filename = f"prd-{slug}.md"
     (worktree_path / "tasks").mkdir(exist_ok=True)
     tool = make_tool(config.prd_tool, config)

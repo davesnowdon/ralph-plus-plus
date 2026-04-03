@@ -166,6 +166,18 @@ _sandbox_dir_option = click.option(
     "(repeatable; prepended to post_worktree_create hooks).",
 )
 @click.option(
+    "--prd-only",
+    is_flag=True,
+    default=False,
+    help="Generate and review the text PRD, then stop. No worktree or implementation.",
+)
+@click.option(
+    "--prd-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to an existing text PRD. Skips generation/review, proceeds to implementation.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -183,9 +195,14 @@ def run(
     skip_post_review: bool,
     setup_cmd: tuple[str, ...],
     sandbox_dir: Path | None,
+    prd_only: bool,
+    prd_file: Path | None,
     dry_run: bool,
 ) -> None:
     """Run the full Ralph agentic coding workflow."""
+    if prd_only and prd_file:
+        raise click.UsageError("--prd-only and --prd-file are mutually exclusive.")
+
     config_paths, repo = _resolve_config(config_file, repo)
     overrides = _build_overrides(repo, claude_config, codex_config, sandbox_dir)
 
@@ -204,6 +221,8 @@ def run(
     orchestrator.run(
         skip_prd_review=skip_prd_review,
         skip_post_review=skip_post_review,
+        prd_only=prd_only,
+        prd_file=prd_file,
     )
 
 
