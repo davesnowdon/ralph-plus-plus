@@ -17,6 +17,9 @@ console = Console()
 class CliTool(BaseTool):
     """Runs any CLI tool defined in config, with optional stdin prompt."""
 
+    # Stay well under Linux ARG_MAX (~128 KB) to avoid E2BIG errors.
+    _ARG_MAX_SAFE = 100_000
+
     def __init__(self, name: str, config: ToolConfig) -> None:
         self.name = name
         self.config = config
@@ -33,8 +36,15 @@ class CliTool(BaseTool):
         if extra_env:
             env.update(extra_env)
 
-        # Build args list, substituting {prompt} placeholder
-        raw_args = [a.replace("{prompt}", prompt) for a in self.config.args]
+        # Check whether embedding {prompt} in args would exceed ARG_MAX.
+        has_prompt_in_args = any("{prompt}" in a for a in self.config.args)
+        prompt_too_large = has_prompt_in_args and len(prompt) > self._ARG_MAX_SAFE
+
+        if prompt_too_large:
+            # Strip {prompt} from args and redirect to stdin instead.
+            raw_args = [a.replace("{prompt}", "") for a in self.config.args]
+        else:
+            raw_args = [a.replace("{prompt}", prompt) for a in self.config.args]
 
         # Inject --allowedTools before positional args when configured
         if self.config.allowed_tools:
@@ -47,6 +57,8 @@ class CliTool(BaseTool):
         stdin_data: str | None = None
         if self.config.stdin is not None:
             stdin_data = self.config.stdin.replace("{prompt}", prompt)
+        elif prompt_too_large:
+            stdin_data = prompt
 
         preview = " ".join(args[:2]) + (" ..." if len(args) > 2 else "")
         console.print("[bold green]→ " + self.name + ":[/bold green] " + preview)
