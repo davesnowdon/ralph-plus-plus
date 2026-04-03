@@ -615,6 +615,82 @@ class TestRetriesExhaustedAborts:
         assert result is False, "Should fail when retries exhausted"
         assert coder_call_count == 2, "Should run initial + 1 retry, then abort (not start iter 2)"
 
+    def test_backout_restores_current_prd_not_initial(self, tmp_path):
+        """Backout must restore prd.json to its state at iteration start, not the initial state.
+
+        Regression: saved_prd_json was captured once before the loop, so backout in
+        iteration N restored the initial prd.json (all stories passes=false) instead of
+        the state after iterations 1..N-1. This caused the review diff to show spurious
+        regressions for previously-completed stories.
+        """
+        worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+
+        # Two stories: US-001 (already done) and US-002 (in progress)
+        import json
+
+        prd_data = {
+            "userStories": [
+                {"id": "US-001", "title": "Done", "passes": True},
+                {"id": "US-002", "title": "Todo", "passes": False},
+            ]
+        }
+        prd_json.write_text(json.dumps(prd_data))
+
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=1, backout_on_failure=True
+        )
+
+        reset_target = None
+
+        def mock_subprocess_run(cmd, **kwargs):
+            nonlocal reset_target
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                # Capture what we're resetting to, but don't actually reset
+                reset_target = cmd[-1] if cmd else None
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False,
+                findings="Major issues",
+                max_severity="major",
+                minor_only=False,
+            )
+
+        with (
+            patch(
+                "ralph_pp.steps.sandbox.subprocess.run",
+                side_effect=mock_subprocess_run,
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._review_iteration",
+                side_effect=mock_review,
+            ),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._get_head_sha",
+                side_effect=_incrementing_sha(),
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # After backout + restore, prd.json should still show US-001 as passes=true
+        restored = json.loads(prd_json.read_text())
+        us001 = next(s for s in restored["userStories"] if s["id"] == "US-001")
+        assert us001["passes"] is True, (
+            "Backout should restore prd.json with previously-completed stories intact"
+        )
+
     def test_fix_in_place_exhausted_returns_false(self, tmp_path):
         """Fix-in-place mode: fixer can't resolve issues → return False."""
         worktree = _setup_worktree(tmp_path)

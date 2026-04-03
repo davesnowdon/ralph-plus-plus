@@ -465,11 +465,6 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
     if not prd_json.exists():
         raise FileNotFoundError(f"prd.json not found at {prd_json}")
 
-    # Save scaffold files so they survive git reset --hard during backout.
-    # _commit_if_dirty uses `git add -A` which stages these untracked files,
-    # so a hard reset to the pre-iteration SHA removes them.
-    saved_prd_json = prd_json.read_text()
-
     last_findings = ""
     consecutive_idle = 0
     prev_story_status = read_story_status(prd_json)
@@ -483,6 +478,11 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
         )
 
         pre_sha = _get_head_sha(worktree_path)
+
+        # Snapshot prd.json so it survives git reset --hard during backout.
+        # Must be re-read each iteration so backout restores the current state
+        # (with previously-completed stories) rather than the initial state.
+        saved_prd_json = prd_json.read_text()
 
         # Run coding step (with retries for backout mode)
         max_attempts = orch.max_iteration_retries + 1 if orch.backout_on_failure else 1
