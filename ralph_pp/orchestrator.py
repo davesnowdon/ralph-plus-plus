@@ -20,7 +20,7 @@ from .steps.prd import (
     generate_prd,
     review_prd_loop,
 )
-from .steps.sandbox import RunSummary, run_sandbox
+from .steps.sandbox import RunSummary, run_sandbox, validate_sandbox_prerequisites
 from .steps.worktree import cleanup_git_config, create_worktree
 
 console = Console()
@@ -55,7 +55,9 @@ class Orchestrator:
         console.print(Panel.fit(title, border_style="bright_blue"))
 
         if self.dry_run:
-            console.print("[yellow]DRY RUN — no commands will be executed[/yellow]")
+            self._print_dry_run_plan(
+                skip_prd_review, skip_post_review, prd_only, prd_file, manual_prd
+            )
             return
 
         start_time = time.monotonic()
@@ -66,6 +68,12 @@ class Orchestrator:
                 return
             if self.resume_worktree:
                 self._step_resume()
+            # Validate sandbox prerequisites before creating the worktree
+            # so we fail fast on misconfiguration (#16).
+            validate_sandbox_prerequisites(self.config)
+            self._step_worktree()
+            if prd_file is not None:
+                self._step_prd_from_file(prd_file)
             else:
                 self._step_worktree()
                 if prd_file is not None:
@@ -87,6 +95,10 @@ class Orchestrator:
                 console.print(
                     f"[dim]Clean up manually with: git worktree remove {self.worktree_path}[/dim]"
                 )
+                try:
+                    run_hooks("post_failure", self.config.hooks, self.worktree_path)
+                except Exception:
+                    pass  # Don't mask the original error
 
         elapsed = time.monotonic() - start_time
         self._print_summary(elapsed, skip_post_review)
@@ -227,3 +239,58 @@ class Orchestrator:
         lines.append(f"Worktree:     {self.worktree_path}")
 
         console.print(Panel.fit("\n".join(lines), border_style="green"))
+
+    def _print_dry_run_plan(
+        self,
+        skip_prd_review: bool,
+        skip_post_review: bool,
+        prd_only: bool,
+        prd_file: Path | None,
+        manual_prd: bool,
+    ) -> None:
+        cfg = self.config
+        mode = cfg.ralph.mode
+        orch = cfg.orchestrated
+
+        lines = ["[yellow]DRY RUN — no commands will be executed[/yellow]", ""]
+        lines.append(f"Feature:       {self.feature}")
+        lines.append(f"Repo:          {cfg.repo_path}")
+        lines.append(f"Mode:          {mode}")
+        lines.append(f"Max iterations: {cfg.ralph.max_iterations}")
+
+        if prd_only:
+            lines.append("\n[bold]Steps:[/bold]")
+            lines.append("  1. Generate PRD" + (" (manual)" if manual_prd else ""))
+            if not skip_prd_review:
+                lines.append("  2. Review PRD loop")
+            lines.append("  → Stop (--prd-only)")
+        else:
+            lines.append("\n[bold]Steps:[/bold]")
+            lines.append("  1. Create worktree + branch")
+            if prd_file:
+                lines.append(f"  2. Copy PRD from: {prd_file}")
+            else:
+                lines.append("  2. Generate PRD" + (" (manual)" if manual_prd else ""))
+                if not skip_prd_review:
+                    lines.append("     + Review PRD loop")
+            lines.append("  3. Convert PRD to prd.json")
+            if mode == "orchestrated":
+                strategy = "backout" if orch.backout_on_failure else "fixup"
+                lines.append(f"  4. Orchestrated sandbox ({strategy})")
+                lines.append(
+                    f"     Coder: {orch.coder}  Reviewer: {orch.reviewer}  Fixer: {orch.fixer}"
+                )
+                if orch.test_commands:
+                    lines.append(f"     Tests: {', '.join(orch.test_commands)}")
+            else:
+                lines.append(f"  4. Delegated sandbox (tool: {cfg.ralph.sandbox_tool})")
+            if not skip_post_review:
+                lines.append(f"  5. Post-run review loop (max {cfg.post_review.max_cycles} cycles)")
+            lines.append("  6. Cleanup")
+
+        hooks = cfg.hooks
+        active_hooks = [k for k, v in hooks.items() if v]
+        if active_hooks:
+            lines.append(f"\n[bold]Active hooks:[/bold] {', '.join(active_hooks)}")
+
+        console.print(Panel.fit("\n".join(lines), title="Execution Plan", border_style="yellow"))

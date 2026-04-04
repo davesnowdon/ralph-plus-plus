@@ -205,6 +205,7 @@ class ToolConfig:
     env: dict[str, str] = field(default_factory=lambda: dict[str, str]())
     interactive: bool = False  # if True, stdin/stdout pass through to terminal
     allowed_tools: list[str] = field(default_factory=lambda: list[str]())  # --allowedTools
+    timeout: int = 0  # seconds; 0 means no timeout
 
 
 @dataclass
@@ -252,9 +253,13 @@ class OrchestratedConfig:
     backout_severity_threshold: str = "major"  # minor | major | critical
     auto_allow_test_commands: bool = True
     max_idle_iterations: int = 2
+    coder_timeout: int = 1800  # seconds (30 min default)
+    reviewer_timeout: int = 300  # seconds (5 min default)
+    fixer_timeout: int = 600  # seconds (10 min default)
     review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
     fix_prompt: str = _ORCHESTRATED_FIX_PROMPT
     prompt_template: str | None = None
+    max_diff_chars: int = 50_000  # truncate diffs exceeding this size
 
 
 @dataclass
