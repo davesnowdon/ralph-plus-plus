@@ -8,6 +8,8 @@ Supports two modes:
 from __future__ import annotations
 
 import json
+import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +29,7 @@ from ._git import (
     run_test_commands_with_output,
 )
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 _ORCHESTRATED_CODER_PROMPT = """\
@@ -127,8 +130,15 @@ def run_sandbox(worktree_path: Path, config: Config) -> RunSummary:
     base_sha_path.parent.mkdir(parents=True, exist_ok=True)
     base_sha_path.write_text(base_sha)
 
+    # Mutable counters dict so _run_orchestrated can update it even if it
+    # raises — the finally block always persists whatever was recorded.
+    counters: dict[str, int] = {"iterations": 0, "retries": 0}
+
     if config.ralph.mode == "orchestrated":
-        success = _run_orchestrated(worktree_path, config)
+        try:
+            success = _run_orchestrated(worktree_path, config, counters)
+        finally:
+            _save_counters(worktree_path, counters["iterations"], counters["retries"])
     else:
         success = _run_delegated(worktree_path, config)
 
@@ -144,27 +154,15 @@ def run_sandbox(worktree_path: Path, config: Config) -> RunSummary:
     else:
         mode = "delegated"
 
-    # Read iteration/retry counters written by _run_orchestrated
-    counters_path = worktree_path / "scripts" / "ralph" / ".run-counters"
-    iterations = 0
-    retries = 0
-    if counters_path.exists():
-        for line in counters_path.read_text().splitlines():
-            key, _, val = line.partition("=")
-            if key == "iterations":
-                iterations = int(val)
-            elif key == "retries":
-                retries = int(val)
-
     return RunSummary(
         mode=mode,
         sandbox_ok=success,
-        iterations=iterations,
+        iterations=counters["iterations"],
         stories_completed=completed,
         stories_total=len(story_status),
         base_sha=base_sha,
         final_sha=get_head_sha(worktree_path),
-        retries=retries,
+        retries=counters["retries"],
     )
 
 
@@ -251,11 +249,27 @@ def _backout_to(
             path.write_text(content)
 
 
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
 def _render_prompt(template: str, **kwargs: str) -> str:
-    """Substitute placeholders in a prompt template."""
+    """Substitute placeholders in a prompt template.
+
+    Warns about any ``{placeholder}`` tokens that were not substituted,
+    since a typo (e.g. ``{diff_output}`` instead of ``{diff}``) would
+    silently pass the literal token to the model.
+    """
     result = template
     for key, value in kwargs.items():
         result = result.replace("{" + key + "}", value)
+
+    remaining = _PLACEHOLDER_RE.findall(result)
+    if remaining:
+        logger.warning(
+            "Prompt template has unsubstituted placeholders: %s (available: %s)",
+            ", ".join(f"{{{p}}}" for p in remaining),
+            ", ".join(f"{{{k}}}" for k in kwargs),
+        )
     return result
 
 
@@ -449,7 +463,8 @@ def _review_iteration(
     result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
     if not result.success:
         raise RuntimeError(
-            f"Iteration reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+            f"Iteration reviewer failed (exit {result.exit_code}): "
+            f"{(result.output or result.stderr)[:200]}"
         )
 
     if result.is_lgtm:
@@ -518,8 +533,25 @@ def _merge_env(extra: dict[str, str]) -> dict[str, str]:
     return env
 
 
-def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
-    """Mode 2: ralph++ controls each iteration with review between them."""
+def _save_counters(worktree_path: Path, iterations: int, retries: int) -> None:
+    """Persist iteration/retry counters for RunSummary."""
+    counters = worktree_path / "scripts" / "ralph" / ".run-counters"
+    counters.parent.mkdir(parents=True, exist_ok=True)
+    counters.write_text(f"iterations={iterations}\nretries={retries}\n")
+
+
+def _run_orchestrated(
+    worktree_path: Path,
+    config: Config,
+    counters: dict[str, int] | None = None,
+) -> bool:
+    """Mode 2: ralph++ controls each iteration with review between them.
+
+    Updates *counters* ``{"iterations": …, "retries": …}`` in place so
+    the caller can read them even if this function raises.
+    """
+    if counters is None:
+        counters = {"iterations": 0, "retries": 0}
     orch: OrchestratedConfig = config.orchestrated
     strategy = "backout" if orch.backout_on_failure else "fixup"
     console.print(f"[bold cyan]\n── Orchestrated mode ({strategy}) ──[/bold cyan]")
@@ -537,17 +569,13 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
     prev_story_status = read_story_status(prd_json)
     total_stories = len(prev_story_status)
 
-    def _save_counters(iters: int) -> None:
-        """Persist iteration/retry counters for RunSummary."""
-        counters = worktree_path / "scripts" / "ralph" / ".run-counters"
-        counters.write_text(f"iterations={iters}\nretries={total_retries}\n")
-
     for iteration in range(1, config.ralph.max_iterations + 1):
         # Reset findings at the start of each outer iteration so that
         # stale context from a previous iteration does not suppress
         # legitimate findings in the current one (#32).
         last_findings = ""
 
+        counters["iterations"] = iteration
         completed = sum(1 for v in prev_story_status.values() if v)
         console.print(
             f"\n[bold]═══ Iteration {iteration}/{config.ralph.max_iterations} "
@@ -633,7 +661,6 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 story_status = read_story_status(prd_json)
                 if all(story_status.values()):
                     console.print("[green]Ralph signaled COMPLETE[/green]")
-                    _save_counters(iteration)
                     return True
                 incomplete = [sid for sid, p in story_status.items() if not p]
                 console.print(
@@ -654,7 +681,6 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         f"[green]No changes for {consecutive_idle} consecutive iterations "
                         "— treating as complete[/green]"
                     )
-                    _save_counters(iteration)
                     return True
                 console.print(
                     f"  [dim]No changes this iteration "
@@ -694,15 +720,17 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                         _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                         continue
 
-            # Review changes — scope to newly-completed stories only
-            stories_text = (
-                format_stories(prd_json, newly_completed)
-                if newly_completed
-                else format_stories(
-                    prd_json,
-                    {sid for sid, p in curr_story_status.items() if not p},
+            # Review changes — scope to newly-completed stories only.
+            # When no story was marked complete, tell the reviewer to
+            # evaluate the diff on its own rather than scoping to all
+            # incomplete stories (which would be noisy and misleading).
+            if newly_completed:
+                stories_text = format_stories(prd_json, newly_completed)
+            else:
+                stories_text = (
+                    "(The coder made changes but did not mark any story "
+                    "as complete. Review the diff on its own merits.)"
                 )
-            )
             diff = _get_diff(worktree_path, pre_sha)
             review = _review_iteration(
                 iteration,
@@ -731,17 +759,18 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                 # PATH A: Backout and retry
                 if attempt < max_attempts:
                     total_retries += 1
+                    counters["retries"] = total_retries
                     _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                 else:
                     console.print(
                         f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
                     )
-                    _save_counters(iteration)
                     return False
             else:
                 # PATH B: Invoke fixer to fix in-place
                 for fix_cycle in range(1, orch.max_iteration_retries + 1):
                     total_retries += 1
+                    counters["retries"] = total_retries
                     console.print(
                         f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]"
                     )
@@ -797,7 +826,6 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
                     console.print(
                         f"  [red]✗ Fix cycles exhausted for iteration {iteration} — aborting[/red]"
                     )
-                    _save_counters(iteration)
                     return False
                 break  # In fix-in-place mode we don't retry the coder, only the fixer
 
@@ -817,5 +845,4 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
         f"[yellow]Reached max iterations ({config.ralph.max_iterations}) "
         "without completion signal[/yellow]"
     )
-    _save_counters(config.ralph.max_iterations)
     return False

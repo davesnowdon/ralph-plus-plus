@@ -468,6 +468,45 @@ class TestReviewerInfraFailure:
                 _run_orchestrated(worktree, config)
 
 
+class TestCountersWrittenOnException:
+    """Counters dict must be updated even when _run_orchestrated raises."""
+
+    def test_counters_updated_when_reviewer_raises(self, tmp_path):
+        """If reviewer crashes at iteration 1, counters should show iterations=1."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=3, max_iteration_retries=0)
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        reviewer_result = ToolResult(output="segfault", exit_code=139, success=False)
+        counters: dict[str, int] = {"iterations": 0, "retries": 0}
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool,
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            mock_tool = MagicMock()
+            mock_tool.run.return_value = reviewer_result
+            mock_make_tool.return_value = mock_tool
+
+            with pytest.raises(RuntimeError):
+                _run_orchestrated(worktree, config, counters)
+
+        assert counters["iterations"] == 1, "Should record that iteration 1 was reached"
+        assert counters["retries"] == 0
+
+
 class TestGitHelperFailures:
     """Round 3: git helpers should raise on failure instead of returning garbage."""
 
@@ -1815,3 +1854,41 @@ class TestStoryScopedReview:
 
         with pytest.raises(PrdParseError, match="missing 'userStories' key"):
             read_story_status(prd_json)
+
+    def test_no_story_completed_uses_fallback_scope(self, tmp_path):
+        """When coder makes changes but marks no story complete, the reviewer
+        should get a fallback note instead of all incomplete stories."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=0, backout_on_failure=False
+        )
+
+        captured_stories_arg = None
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            # Coder runs but does NOT update prd.json — no story marked complete
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            nonlocal captured_stories_arg
+            captured_stories_arg = kwargs.get("stories_under_review", "")
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        assert captured_stories_arg is not None
+        assert "did not mark any story" in captured_stories_arg
