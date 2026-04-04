@@ -116,11 +116,16 @@ def test_render_prompt():
     assert result == "Review my diff against /path/prd.json"
 
 
-def test_render_prompt_missing_placeholder():
-    """Missing placeholders are left as-is."""
+def test_render_prompt_missing_placeholder(caplog):
+    """Missing placeholders are left as-is and a warning is emitted."""
+    import logging
+
     template = "Review {diff} and {unknown}"
-    result = _render_prompt(template, diff="changes")
+    with caplog.at_level(logging.WARNING, logger="ralph_pp.steps.sandbox"):
+        result = _render_prompt(template, diff="changes")
     assert result == "Review changes and {unknown}"
+    assert "unsubstituted placeholders" in caplog.text
+    assert "{unknown}" in caplog.text
 
 
 def test_delegated_mode_integration(tmp_path):
