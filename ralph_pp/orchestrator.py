@@ -21,7 +21,7 @@ from .steps.prd import (
     review_prd_loop,
 )
 from .steps.sandbox import RunSummary, run_sandbox, validate_sandbox_prerequisites
-from .steps.worktree import cleanup_git_config, create_worktree
+from .steps.worktree import cleanup_git_config, create_worktree, snapshot_local_config
 
 console = Console()
 
@@ -33,6 +33,7 @@ class Orchestrator:
         self.dry_run = dry_run
         self.worktree_path: Path | None = None
         self.branch: str | None = None
+        self._baseline_config_keys: set[str] | None = None
         self._run_summary: RunSummary | None = None
         self._review_result: PostReviewResult | None = None
 
@@ -95,6 +96,8 @@ class Orchestrator:
     def _step_worktree(self) -> None:
         console.print(Rule("[bold]1 · Worktree[/bold]"))
         self.worktree_path, self.branch = create_worktree(self.feature, self.config)
+        # Snapshot local config before hooks run, so cleanup can diff later
+        self._baseline_config_keys = snapshot_local_config(self.worktree_path)
         run_hooks("post_worktree_create", self.config.hooks, self.worktree_path)
 
     def _step_prd_only(self, skip_review: bool, *, manual_prd: bool = False) -> None:
@@ -161,7 +164,7 @@ class Orchestrator:
     def _step_cleanup(self) -> None:
         assert self.worktree_path is not None
         console.print(Rule("[bold]5 · Cleanup[/bold]"))
-        cleanup_git_config(self.worktree_path)
+        cleanup_git_config(self.worktree_path, self._baseline_config_keys)
         run_hooks("post_complete", self.config.hooks, self.worktree_path)
 
     def _print_summary(self, elapsed: float, skip_post_review: bool) -> None:

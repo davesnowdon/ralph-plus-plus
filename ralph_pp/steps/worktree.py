@@ -56,27 +56,50 @@ def create_worktree(feature: str, config: Config) -> tuple[Path, str]:
     return worktree_path, branch
 
 
-def cleanup_git_config(worktree_path: Path) -> None:
-    """Remove any locally set git user config from the worktree."""
+def snapshot_local_config(worktree_path: Path) -> set[str]:
+    """Return the set of local git config keys present in the worktree."""
+    result = subprocess.run(
+        ["git", "config", "--local", "--list"],
+        cwd=worktree_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    keys: set[str] = set()
+    for line in result.stdout.splitlines():
+        key, _, _ = line.partition("=")
+        if key:
+            keys.add(key)
+    return keys
+
+
+def cleanup_git_config(worktree_path: Path, baseline_keys: set[str] | None = None) -> None:
+    """Remove locally set git config keys that were added after worktree creation.
+
+    If *baseline_keys* is provided, unsets any local key not in the
+    baseline. Otherwise falls back to unsetting user.name and user.email.
+    """
     console.print("[bold]Cleaning up git config...[/bold]")
-    for key in ("user.name", "user.email"):
-        subprocess.run(
-            ["git", "config", "--unset", key],
+
+    current_keys = snapshot_local_config(worktree_path)
+    keys_to_remove: set[str] = set()
+    if baseline_keys is not None:
+        keys_to_remove = current_keys - baseline_keys
+    # Always include user.name/email for backward compatibility
+    keys_to_remove |= current_keys & {"user.name", "user.email"}
+
+    removed = 0
+    for key in sorted(keys_to_remove):
+        result = subprocess.run(
+            ["git", "config", "--local", "--unset", key],
             cwd=worktree_path,
-            # unset returns exit 5 if key not set — that is fine
             check=False,
             text=True,
         )
-    # Verify
-    result = subprocess.run(
-        ["git", "config", "--list"],
-        cwd=worktree_path,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    user_lines = [line for line in result.stdout.splitlines() if line.startswith("user.")]
-    if user_lines:
-        console.print(f"[yellow]Remaining user config:[/yellow] {user_lines}")
+        if result.returncode == 0:
+            removed += 1
+
+    if removed:
+        console.print(f"[green]✓ Removed {removed} local git config key(s)[/green]")
     else:
-        console.print("[green]✓ Git user config clean[/green]")
+        console.print("[green]✓ No local git config to clean up[/green]")
