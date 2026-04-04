@@ -117,6 +117,20 @@ class RunSummary:
     retries: int  # total backout retries or fix cycles
 
 
+def validate_sandbox_prerequisites(config: Config) -> None:
+    """Validate sandbox configuration before expensive workflow steps.
+
+    Call this early (before worktree creation) so misconfigurations
+    fail fast instead of minutes into the workflow.
+    """
+    # Validate sandbox directory resolves
+    resolve_sandbox_dir(config)
+
+    # Validate session runner exists (orchestrated mode only)
+    if config.ralph.mode == "orchestrated":
+        _session_runner_path(config)
+
+
 def run_sandbox(worktree_path: Path, config: Config) -> RunSummary:
     """Run the Ralph loop. Dispatches to delegated or orchestrated mode.
 
@@ -422,6 +436,16 @@ class ReviewResult:
     minor_only: bool  # True when all findings are minor (or LGTM)
 
 
+def truncate_diff(diff: str, max_chars: int) -> str:
+    """Truncate a diff to *max_chars* with a note if truncated."""
+    if max_chars <= 0 or len(diff) <= max_chars:
+        return diff
+    return (
+        diff[:max_chars] + f"\n\n... [diff truncated at {max_chars} characters; "
+        f"{len(diff) - max_chars} characters omitted] ..."
+    )
+
+
 def _review_iteration(
     iteration: int,
     diff: str,
@@ -435,6 +459,11 @@ def _review_iteration(
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
     reviewer = make_tool(orch.reviewer, config)
+
+    # Truncate diffs to prevent exceeding model context windows
+    diff = truncate_diff(diff, orch.max_diff_chars)
+    if fixer_diff:
+        fixer_diff = truncate_diff(fixer_diff, orch.max_diff_chars)
 
     if previous_findings:
         context = (
@@ -521,7 +550,17 @@ def _run_fixer_in_sandbox(
     # Set RALPH_PROMPT_FILE so the session runner uses the fix prompt
     env_patch = {"RALPH_PROMPT_FILE": str(Path("scripts/ralph/.fix-prompt.md"))}
     console.print(f"  [dim]Running fixer ({orch.fixer})...[/dim]")
-    return subprocess.run(cmd, text=True, capture_output=True, env=_merge_env(env_patch))
+    try:
+        return subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            env=_merge_env(env_patch),
+            timeout=orch.fixer_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        console.print(f"  [red]✗ Fixer timed out after {orch.fixer_timeout}s[/red]")
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="timeout")
 
 
 def _merge_env(extra: dict[str, str]) -> dict[str, str]:
@@ -649,12 +688,17 @@ def _run_orchestrated(
                 ralph_args=["1"],
             )
             console.print(f"  [dim]Running coder ({orch.coder})...[/dim]")
-            result = subprocess.run(
-                cmd,
-                text=True,
-                capture_output=True,
-                env=_merge_env(extra_env) if extra_env else None,
-            )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    text=True,
+                    capture_output=True,
+                    env=_merge_env(extra_env) if extra_env else None,
+                    timeout=orch.coder_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                console.print(f"  [red]✗ Coder timed out after {orch.coder_timeout}s[/red]")
+                result = subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="timeout")
 
             combined_output = (result.stdout or "") + (result.stderr or "")
             if combined_output:

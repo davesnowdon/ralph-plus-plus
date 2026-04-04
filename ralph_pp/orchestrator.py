@@ -20,7 +20,7 @@ from .steps.prd import (
     generate_prd,
     review_prd_loop,
 )
-from .steps.sandbox import RunSummary, run_sandbox
+from .steps.sandbox import RunSummary, run_sandbox, validate_sandbox_prerequisites
 from .steps.worktree import cleanup_git_config, create_worktree
 
 console = Console()
@@ -57,6 +57,9 @@ class Orchestrator:
             if prd_only:
                 self._step_prd_only(skip_prd_review, manual_prd=manual_prd)
                 return
+            # Validate sandbox prerequisites before creating the worktree
+            # so we fail fast on misconfiguration (#16).
+            validate_sandbox_prerequisites(self.config)
             self._step_worktree()
             if prd_file is not None:
                 self._step_prd_from_file(prd_file)
@@ -77,6 +80,10 @@ class Orchestrator:
                 console.print(
                     f"[dim]Clean up manually with: git worktree remove {self.worktree_path}[/dim]"
                 )
+                try:
+                    run_hooks("post_failure", self.config.hooks, self.worktree_path)
+                except Exception:
+                    pass  # Don't mask the original error
 
         elapsed = time.monotonic() - start_time
         self._print_summary(elapsed, skip_post_review)
