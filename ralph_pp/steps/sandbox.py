@@ -567,6 +567,20 @@ def _run_orchestrated(
     consecutive_idle = 0
     total_retries = 0
     prev_story_status = read_story_status(prd_json)
+
+    # Apply story filter: treat non-filtered stories as already complete
+    if orch.story_filter:
+        filter_set = set(orch.story_filter)
+        unknown = filter_set - set(prev_story_status)
+        if unknown:
+            console.print(
+                f"[yellow]⚠ Unknown story IDs in filter: {', '.join(sorted(unknown))}[/yellow]"
+            )
+        for sid in prev_story_status:
+            if sid not in filter_set:
+                prev_story_status[sid] = True
+        console.print(f"[cyan]Story filter active: {', '.join(sorted(filter_set))}[/cyan]")
+
     total_stories = len(prev_story_status)
 
     for iteration in range(1, config.ralph.max_iterations + 1):

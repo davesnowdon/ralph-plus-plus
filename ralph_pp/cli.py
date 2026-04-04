@@ -185,6 +185,13 @@ _sandbox_dir_option = click.option(
     "auto-prompting the feature description. Use the /prd skill manually.",
 )
 @click.option(
+    "--story",
+    "story_filter",
+    multiple=True,
+    help="Run only specific stories by ID (e.g. --story US-003 --story US-004). "
+    "Repeatable. When set, other stories are treated as already complete.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -205,6 +212,7 @@ def run(
     prd_only: bool,
     prd_file: Path | None,
     manual_prd: bool,
+    story_filter: tuple[str, ...],
     dry_run: bool,
 ) -> None:
     """Run the full Ralph agentic coding workflow."""
@@ -231,6 +239,8 @@ def run(
     if setup_cmd:
         existing = cfg.hooks.get("post_worktree_create", [])
         cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
+    if story_filter:
+        cfg.orchestrated.story_filter = list(story_filter)
 
     orchestrator = Orchestrator(feature=feature, config=cfg, dry_run=dry_run)
     orchestrator.run(
