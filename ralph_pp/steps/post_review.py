@@ -11,7 +11,7 @@ from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
 from ..tools import make_tool, make_tool_with_permissions
 from ._git import format_test_results, get_diff, get_head_sha, run_test_commands_with_output
 from .prd import MaxCyclesAbort, prompt_max_cycles
-from .sandbox import BASE_SHA_FILE, truncate_diff, format_all_completed
+from .sandbox import BASE_SHA_FILE, format_all_completed, truncate_diff
 
 console = Console()
 
