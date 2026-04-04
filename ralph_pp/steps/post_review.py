@@ -10,6 +10,7 @@ from rich.console import Console
 from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
 from ..tools import make_tool, make_tool_with_permissions
 from ._git import format_test_results, get_diff, get_head_sha, run_test_commands_with_output
+from ._prompts import render_prompt
 from .prd import MaxCyclesAbort, prompt_max_cycles
 from .sandbox import BASE_SHA_FILE, format_all_completed, truncate_diff
 
@@ -118,13 +119,14 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
                 console.print(f"  [dim]Tests {status_str}[/dim]")
                 test_results_text = format_test_results(test_output, tests_ok)
 
-            review_prompt = (
-                review_cfg.reviewer_prompt.replace("{stories_under_review}", stories_text)
-                .replace("{incomplete_stories_note}", incomplete_note)
-                .replace("{diff}", diff_text)
-                .replace("{previous_findings}", context)
-                .replace("{test_commands_guidance}", guidance)
-                .replace("{test_results}", test_results_text)
+            review_prompt = render_prompt(
+                review_cfg.reviewer_prompt,
+                stories_under_review=stories_text,
+                incomplete_stories_note=incomplete_note,
+                diff=diff_text,
+                previous_findings=context,
+                test_commands_guidance=guidance,
+                test_results=test_results_text,
             )
             result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
             if not result.success:
@@ -142,9 +144,11 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
                 f"[yellow]Issues found in cycle {total_cycles} — running fix pass...[/yellow]"
             )
             pre_fix_sha = get_head_sha(worktree_path)
-            fix_prompt = review_cfg.fixer_prompt.replace(
-                "{stories_under_review}", stories_text
-            ).replace("{findings}", result.output)
+            fix_prompt = render_prompt(
+                review_cfg.fixer_prompt,
+                stories_under_review=stories_text,
+                findings=result.output,
+            )
             fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
             if not fix_result.success:
                 raise RuntimeError(

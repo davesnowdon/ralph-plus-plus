@@ -12,6 +12,7 @@ from rich.console import Console
 from ..config import Config, PrdReviewConfig
 from ..tools import make_tool
 from ._git import get_diff, get_head_sha
+from ._prompts import render_prompt
 
 console = Console()
 
@@ -159,8 +160,10 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
             else:
                 context = ""
 
-            review_prompt = review_cfg.reviewer_prompt.replace("{prd_file}", str(prd_file)).replace(
-                "{previous_findings}", context
+            review_prompt = render_prompt(
+                review_cfg.reviewer_prompt,
+                prd_file=str(prd_file),
+                previous_findings=context,
             )
             result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
             if not result.success:
@@ -178,8 +181,10 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
                 f"[yellow]Issues found in cycle {total_cycles} — running fix pass...[/yellow]"
             )
             pre_fix_sha = get_head_sha(worktree_path)
-            fix_prompt = review_cfg.fixer_prompt.replace("{prd_file}", str(prd_file)).replace(
-                "{findings}", result.output
+            fix_prompt = render_prompt(
+                review_cfg.fixer_prompt,
+                prd_file=str(prd_file),
+                findings=result.output,
             )
             fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
             if not fix_result.success:
