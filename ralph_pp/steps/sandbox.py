@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -526,8 +527,6 @@ def _run_fixer_in_sandbox(
 
 def _merge_env(extra: dict[str, str]) -> dict[str, str]:
     """Merge extra env vars into a copy of the current environment."""
-    import os
-
     env = os.environ.copy()
     env.update(extra)
     return env
