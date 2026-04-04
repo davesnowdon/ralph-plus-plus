@@ -101,7 +101,12 @@ class Orchestrator:
 
         console.print(Rule(style="green"))
         console.print(Panel.fit(prd_file.read_text(), title="PRD", border_style="cyan"))
-        summary = "✓ PRD generated!\nFile: " + str(prd_file)
+        summary = (
+            "✓ PRD generated!\n\n"
+            f"File: {prd_file}\n\n"
+            "To run implementation with this PRD:\n"
+            f"  ralph++ --feature {self.feature!r} --prd-file {prd_file}"
+        )
         console.print(Panel.fit(summary, border_style="green"))
 
     def _step_prd_from_file(self, prd_file: Path) -> None:
