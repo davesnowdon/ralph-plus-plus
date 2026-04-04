@@ -449,7 +449,8 @@ def _review_iteration(
     result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
     if not result.success:
         raise RuntimeError(
-            f"Iteration reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+            f"Iteration reviewer failed (exit {result.exit_code}): "
+            f"{(result.output or result.stderr)[:200]}"
         )
 
     if result.is_lgtm:

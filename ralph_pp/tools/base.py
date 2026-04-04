@@ -29,12 +29,19 @@ class ToolResult:
     output: str
     exit_code: int
     success: bool
+    stderr: str = ""
 
     @property
     def is_lgtm(self) -> bool:
-        """True if the tool output signals no issues found."""
+        """True if the tool output signals no issues found.
+
+        Only checks ``output`` (stdout).  The ``stderr`` field is ignored
+        because CLI tools routinely emit warnings/deprecation notices there.
+        Tolerates common model variations like ``LGTM!``, ``LGTM.``, and
+        case-insensitive matches.
+        """
         stripped = self.output.strip()
-        return stripped == "LGTM" or stripped.startswith("LGTM\n")
+        return bool(re.match(r"^LGTM[^a-z]?($|\n)", stripped, re.IGNORECASE))
 
 
 class BaseTool(ABC):
