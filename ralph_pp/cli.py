@@ -13,6 +13,7 @@ from .config import (
     format_effective_config,
     load_config,
     load_config_with_provenance,
+    parse_mode,
 )
 from .orchestrator import Orchestrator
 
@@ -235,7 +236,7 @@ def run(
     if max_iters is not None:
         cfg.ralph.max_iterations = max_iters
     if mode is not None:
-        cfg.ralph.mode = mode
+        cfg.ralph.mode = parse_mode(mode)
     if setup_cmd:
         existing = cfg.hooks.get("post_worktree_create", [])
         cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
