@@ -570,6 +570,11 @@ def _run_orchestrated(
     total_stories = len(prev_story_status)
 
     for iteration in range(1, config.ralph.max_iterations + 1):
+        # Reset findings at the start of each outer iteration so that
+        # stale context from a previous iteration does not suppress
+        # legitimate findings in the current one (#32).
+        last_findings = ""
+
         counters["iterations"] = iteration
         completed = sum(1 for v in prev_story_status.values() if v)
         console.print(

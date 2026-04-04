@@ -1167,6 +1167,53 @@ class TestPreviousFindings:
         )
 
 
+class TestFindingsNotLeakedAcrossIterations:
+    """Findings from iteration N must not contaminate the review of iteration N+1."""
+
+    def test_iteration2_reviewer_gets_no_previous_findings(self, tmp_path):
+        """After iteration 1 has findings, iteration 2's first review should
+        have no previous_findings context."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=2, max_iteration_retries=0, backout_on_failure=False
+        )
+
+        review_calls: list[dict] = []
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            review_calls.append(kwargs)
+            # Accept every iteration so we progress to iteration 2
+            return ReviewResult(
+                passed=True, findings="Minor: style nits", max_severity="minor", minor_only=True
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        assert len(review_calls) == 2, "Should have reviewed both iterations"
+        # Iteration 2's review should have empty previous_findings
+        iter2_findings = review_calls[1].get("previous_findings", "")
+        assert iter2_findings == "", (
+            f"Iteration 2 should have no previous_findings, got: {iter2_findings!r}"
+        )
+
+
 class TestSeverityGatedBackout:
     """Backout should only trigger when findings meet the severity threshold."""
 
