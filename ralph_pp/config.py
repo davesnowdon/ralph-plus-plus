@@ -209,27 +209,27 @@ class ToolConfig:
 
 
 @dataclass
-class ReviewConfig:
-    """Base review config — prefer PrdReviewConfig or PostReviewConfig."""
+class PrdReviewConfig:
+    """Review config for PRD review loop."""
 
     reviewer: str = "codex"
-    reviewer_prompt: str = ""
+    reviewer_prompt: str = _PRD_REVIEWER_PROMPT
     fixer: str = "claude"
-    fixer_prompt: str = ""
+    fixer_prompt: str = _PRD_FIXER_PROMPT
     max_cycles: int = 3
     enabled: bool = True
 
 
 @dataclass
-class PrdReviewConfig(ReviewConfig):
-    reviewer_prompt: str = _PRD_REVIEWER_PROMPT
-    fixer_prompt: str = _PRD_FIXER_PROMPT
+class PostReviewConfig:
+    """Review config for post-run review loop."""
 
-
-@dataclass
-class PostReviewConfig(ReviewConfig):
+    reviewer: str = "codex"
     reviewer_prompt: str = _POST_REVIEWER_PROMPT
+    fixer: str = "claude"
     fixer_prompt: str = _POST_FIXER_PROMPT
+    max_cycles: int = 3
+    enabled: bool = True
 
 
 @dataclass
