@@ -117,6 +117,20 @@ class RunSummary:
     retries: int  # total backout retries or fix cycles
 
 
+def validate_sandbox_prerequisites(config: Config) -> None:
+    """Validate sandbox configuration before expensive workflow steps.
+
+    Call this early (before worktree creation) so misconfigurations
+    fail fast instead of minutes into the workflow.
+    """
+    # Validate sandbox directory resolves
+    resolve_sandbox_dir(config)
+
+    # Validate session runner exists (orchestrated mode only)
+    if config.ralph.mode == "orchestrated":
+        _session_runner_path(config)
+
+
 def run_sandbox(worktree_path: Path, config: Config) -> RunSummary:
     """Run the Ralph loop. Dispatches to delegated or orchestrated mode.
 
