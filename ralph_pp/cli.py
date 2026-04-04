@@ -180,6 +180,13 @@ _sandbox_dir_option = click.option(
     help="Path to an existing text PRD. Skips generation/review, proceeds to implementation.",
 )
 @click.option(
+    "--manual-prd",
+    is_flag=True,
+    default=False,
+    help="Open an interactive Claude session for PRD generation without "
+    "auto-prompting the feature description. Use the /prd skill manually.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -199,6 +206,7 @@ def run(
     sandbox_dir: Path | None,
     prd_only: bool,
     prd_file: Path | None,
+    manual_prd: bool,
     dry_run: bool,
 ) -> None:
     """Run the full Ralph agentic coding workflow."""
@@ -232,6 +240,7 @@ def run(
         skip_post_review=skip_post_review,
         prd_only=prd_only,
         prd_file=prd_file,
+        manual_prd=manual_prd,
     )
 
 

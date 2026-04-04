@@ -42,6 +42,7 @@ class Orchestrator:
         skip_post_review: bool = False,
         prd_only: bool = False,
         prd_file: Path | None = None,
+        manual_prd: bool = False,
     ) -> None:
         title = "ralph++\nFeature: " + self.feature
         console.print(Panel.fit(title, border_style="bright_blue"))
@@ -53,13 +54,13 @@ class Orchestrator:
         start_time = time.monotonic()
         try:
             if prd_only:
-                self._step_prd_only(skip_prd_review)
+                self._step_prd_only(skip_prd_review, manual_prd=manual_prd)
                 return
             self._step_worktree()
             if prd_file is not None:
                 self._step_prd_from_file(prd_file)
             else:
-                self._step_prd(skip_prd_review)
+                self._step_prd(skip_prd_review, manual_prd=manual_prd)
             self._step_sandbox()
             if not skip_post_review:
                 self._step_post_review()
@@ -78,13 +79,13 @@ class Orchestrator:
         self.worktree_path, self.branch = create_worktree(self.feature, self.config)
         run_hooks("post_worktree_create", self.config.hooks, self.worktree_path)
 
-    def _step_prd_only(self, skip_review: bool) -> None:
+    def _step_prd_only(self, skip_review: bool, *, manual_prd: bool = False) -> None:
         """Generate (and optionally review) the text PRD, then stop."""
         base = self.config.repo_path
         console.print(Rule("[bold]PRD Only[/bold]"))
         ensure_prd_skills(self.config, base)
         run_hooks("pre_prd_generate", self.config.hooks, base)
-        prd_file = generate_prd(self.feature, base, self.config)
+        prd_file = generate_prd(self.feature, base, self.config, manual=manual_prd)
         run_hooks("post_prd_generate", self.config.hooks, base)
         if not skip_review:
             review_prd_loop(prd_file, base, self.config)
@@ -105,12 +106,12 @@ class Orchestrator:
         console.print(f"[green]✓ PRD copied:[/green] {prd_file} → {dest}")
         convert_prd_to_json(dest, self.worktree_path, self.config)
 
-    def _step_prd(self, skip_review: bool) -> None:
+    def _step_prd(self, skip_review: bool, *, manual_prd: bool = False) -> None:
         assert self.worktree_path is not None
         console.print(Rule("[bold]2 · PRD[/bold]"))
         ensure_prd_skills(self.config, self.worktree_path)
         run_hooks("pre_prd_generate", self.config.hooks, self.worktree_path)
-        prd_file = generate_prd(self.feature, self.worktree_path, self.config)
+        prd_file = generate_prd(self.feature, self.worktree_path, self.config, manual=manual_prd)
         run_hooks("post_prd_generate", self.config.hooks, self.worktree_path)
         if not skip_review:
             review_prd_loop(prd_file, self.worktree_path, self.config)
