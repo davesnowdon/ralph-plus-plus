@@ -80,6 +80,10 @@ class Orchestrator:
                 console.print(
                     f"[dim]Clean up manually with: git worktree remove {self.worktree_path}[/dim]"
                 )
+                try:
+                    run_hooks("post_failure", self.config.hooks, self.worktree_path)
+                except Exception:
+                    pass  # Don't mask the original error
 
         elapsed = time.monotonic() - start_time
         self._print_summary(elapsed, skip_post_review)
