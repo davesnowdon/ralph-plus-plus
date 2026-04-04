@@ -28,9 +28,19 @@ def create_worktree(feature: str, config: Config) -> tuple[Path, str]:
     Returns:
         (worktree_path, branch_name)
     """
-    branch = make_branch_name(feature, config)
-    # Place worktree as a sibling of the repo directory
-    worktree_path = config.repo_path.parent / branch.replace("/", "-")
+    # Try up to a few times in case the generated path already exists
+    # (e.g. from a previous failed run with the same random suffix).
+    branch = ""
+    worktree_path = Path()
+    for _attempt in range(5):
+        branch = make_branch_name(feature, config)
+        worktree_path = config.repo_path.parent / branch.replace("/", "-")
+        if not worktree_path.exists():
+            break
+    else:
+        raise RuntimeError(
+            f"Could not find a free worktree path after 5 attempts (last tried: {worktree_path})"
+        )
 
     console.print(f"[bold]Creating worktree:[/bold] {worktree_path}")
     console.print(f"[bold]Branch:[/bold] {branch}")
