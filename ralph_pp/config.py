@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -234,7 +234,7 @@ class PostReviewConfig(ReviewConfig):
 @dataclass
 class RalphConfig:
     max_iterations: int = 20
-    mode: str = "delegated"  # "delegated" | "orchestrated"
+    mode: Literal["delegated", "orchestrated"] = "delegated"
     sandbox_dir: str = ""  # path to ralph-sandbox checkout
     sandbox_tool: str = "claude"  # tool for sandbox (delegated mode): claude | codex
     session_runner: str = "scripts/ralph-single-step.sh"  # session runner for orchestrated mode
@@ -249,7 +249,7 @@ class OrchestratedConfig:
     run_tests_between_steps: bool = False
     test_commands: list[str] = field(default_factory=lambda: list[str]())
     backout_on_failure: bool = True
-    backout_severity_threshold: str = "major"  # minor | major | critical
+    backout_severity_threshold: Literal["minor", "major", "critical"] = "major"
     auto_allow_test_commands: bool = True
     max_idle_iterations: int = 2
     review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
