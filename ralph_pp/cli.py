@@ -30,7 +30,7 @@ class _DefaultGroup(click.Group):
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         # If there are args and the first one is not a known subcommand,
         # implicitly prepend "run" so `ralph++ --feature "…"` still works.
-        if args and args[0] not in self.commands:
+        if args and not args[0].startswith("-") and args[0] not in self.commands:
             args = ["run"] + args
         return super().parse_args(ctx, args)
 
@@ -312,13 +312,19 @@ def _find_ralph_worktrees(repo_path: Path) -> list[tuple[str, str]]:
     """Return ``[(path, branch), ...]`` for all ralph++ worktrees in *repo_path*."""
     import subprocess
 
-    result = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=repo_path,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=repo_path,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise click.UsageError(
+            f"Not a git repository or git is not available: {repo_path}\n"
+            f"  {exc.stderr.strip() if exc.stderr else exc}"
+        ) from exc
 
     entries: list[tuple[str, str]] = []
     current_path = ""
@@ -369,22 +375,35 @@ def worktrees_clean(repo: Path | None, force: bool) -> None:
         console.print("[dim]No ralph++ worktrees to clean.[/dim]")
         return
 
+    removed = 0
+    failed = 0
     for path, branch in entries:
         console.print(f"[yellow]Removing:[/yellow] {path} ({branch})")
         force_flag = ["--force"] if force else []
-        subprocess.run(
+        wt_result = subprocess.run(
             ["git", "worktree", "remove", *force_flag, path],
             cwd=repo_path,
             check=False,
+            capture_output=True,
+            text=True,
         )
+        if wt_result.returncode != 0:
+            failed += 1
+            msg = wt_result.stderr.strip() or f"exit code {wt_result.returncode}"
+            console.print(f"[red]  ✗ Failed to remove worktree: {msg}[/red]")
+            continue
         subprocess.run(
             ["git", "branch", "-D", branch],
             cwd=repo_path,
             check=False,
             capture_output=True,
         )
+        removed += 1
 
-    console.print(f"[green]✓ Removed {len(entries)} worktree(s)[/green]")
+    if removed:
+        console.print(f"[green]✓ Removed {removed} worktree(s)[/green]")
+    if failed:
+        console.print(f"[red]✗ Failed to remove {failed} worktree(s)[/red]")
 
 
 if __name__ == "__main__":

@@ -335,7 +335,7 @@ def _parse_bool(value: Any, default: bool) -> bool:
         if value.lower() in ("false", "no", "0"):
             return False
         raise ValueError(f"Invalid boolean value: {value!r}")
-    return bool(value)
+    return default
 
 
 _RC = Any  # TypeVar would be cleaner but not worth the import for internal use
@@ -363,6 +363,7 @@ def _parse_tools(data: dict[str, Any]) -> dict[str, ToolConfig]:
             env=cfg.get("env", {}),
             interactive=_parse_bool(cfg.get("interactive", False), False),
             allowed_tools=cfg.get("allowed_tools", []),
+            timeout=int(cfg.get("timeout", 0)),
         )
     return tools
 
@@ -588,9 +589,15 @@ def _build_config(data: dict[str, Any]) -> Config:
                 o.get("auto_allow_test_commands", defaults.auto_allow_test_commands),
                 defaults.auto_allow_test_commands,
             ),
+            max_idle_iterations=int(o.get("max_idle_iterations", defaults.max_idle_iterations)),
+            coder_timeout=int(o.get("coder_timeout", defaults.coder_timeout)),
+            reviewer_timeout=int(o.get("reviewer_timeout", defaults.reviewer_timeout)),
+            fixer_timeout=int(o.get("fixer_timeout", defaults.fixer_timeout)),
             review_prompt=o.get("review_prompt", defaults.review_prompt),
             fix_prompt=o.get("fix_prompt", defaults.fix_prompt),
             prompt_template=o.get("prompt_template", defaults.prompt_template),
+            story_filter=o.get("story_filter", defaults.story_filter),
+            max_diff_chars=int(o.get("max_diff_chars", defaults.max_diff_chars)),
         )
 
     cfg.hooks = data.get("hooks", {})

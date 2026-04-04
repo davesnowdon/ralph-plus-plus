@@ -151,8 +151,8 @@ class TestCoderInfraFailure:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -187,8 +187,8 @@ class TestCoderInfraFailure:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -240,8 +240,8 @@ class TestFixerInfraFailure:
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -289,8 +289,8 @@ class TestTestFailureBlocking:
                 "ralph_pp.steps.sandbox.run_test_commands_with_output",
                 side_effect=mock_test_commands,
             ),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -346,8 +346,8 @@ class TestFixInPlaceTestRerun:
                 "ralph_pp.steps.sandbox.run_test_commands_with_output",
                 side_effect=mock_test_commands,
             ),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -412,8 +412,8 @@ class TestFixInPlaceTestRerun:
                 "ralph_pp.steps.sandbox.run_test_commands_with_output",
                 side_effect=mock_test_commands,
             ),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -452,9 +452,9 @@ class TestReviewerInfraFailure:
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
-            patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool,
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool,
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -488,9 +488,9 @@ class TestCountersWrittenOnException:
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
-            patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool,
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool,
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -564,8 +564,8 @@ class TestPromptPropagation:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -642,8 +642,8 @@ class TestRetriesExhaustedAborts:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -711,9 +711,9 @@ class TestRetriesExhaustedAborts:
                 "ralph_pp.steps.sandbox._review_iteration",
                 side_effect=mock_review,
             ),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
             patch(
-                "ralph_pp.steps.sandbox._get_head_sha",
+                "ralph_pp.steps.sandbox.get_head_sha",
                 side_effect=_incrementing_sha(),
             ),
             patch(
@@ -756,8 +756,8 @@ class TestRetriesExhaustedAborts:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -798,7 +798,7 @@ class TestCommitIfDirty:
 
     def test_creates_commit_when_dirty(self, tmp_path):
         """Dirty working tree → commit created, returns True."""
-        from ralph_pp.steps.sandbox import _commit_if_dirty
+        from ralph_pp.steps.sandbox import commit_if_dirty
 
         self._init_repo(tmp_path)
         old_sha = subprocess.run(
@@ -811,7 +811,7 @@ class TestCommitIfDirty:
         # Create an uncommitted file
         (tmp_path / "new_file.py").write_text("print('hello')")
 
-        result = _commit_if_dirty(tmp_path, "test commit")
+        result = commit_if_dirty(tmp_path, "test commit")
 
         assert result is True
         new_sha = subprocess.run(
@@ -824,11 +824,11 @@ class TestCommitIfDirty:
 
     def test_noop_when_clean(self, tmp_path):
         """Clean working tree → no commit, returns False."""
-        from ralph_pp.steps.sandbox import _commit_if_dirty
+        from ralph_pp.steps.sandbox import commit_if_dirty
 
         self._init_repo(tmp_path)
 
-        result = _commit_if_dirty(tmp_path, "should not appear")
+        result = commit_if_dirty(tmp_path, "should not appear")
 
         assert result is False
 
@@ -850,7 +850,7 @@ class TestPreviousFindings:
             captured_prompt = prompt
             return ToolResult(output="LGTM", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool:
             mock_tool = MagicMock()
             mock_tool.run.side_effect = mock_tool_run
             mock_make_tool.return_value = mock_tool
@@ -881,7 +881,7 @@ class TestPreviousFindings:
             captured_prompt = prompt
             return ToolResult(output="LGTM", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool:
             mock_tool = MagicMock()
             mock_tool.run.side_effect = mock_tool_run
             mock_make_tool.return_value = mock_tool
@@ -910,7 +910,7 @@ class TestPreviousFindings:
             captured_prompt = prompt
             return ToolResult(output="LGTM", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool:
             mock_tool = MagicMock()
             mock_tool.run.side_effect = mock_tool_run
             mock_make_tool.return_value = mock_tool
@@ -940,7 +940,7 @@ class TestPreviousFindings:
             captured_prompt = prompt
             return ToolResult(output="LGTM", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool:
             mock_tool = MagicMock()
             mock_tool.run.side_effect = mock_tool_run
             mock_make_tool.return_value = mock_tool
@@ -993,8 +993,8 @@ class TestPreviousFindings:
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
             patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", side_effect=mock_commit),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", side_effect=mock_commit),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1047,8 +1047,8 @@ class TestPreviousFindings:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1103,9 +1103,9 @@ class TestPreviousFindings:
                 "ralph_pp.steps.sandbox._review_iteration",
                 side_effect=mock_review,
             ),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
             patch(
-                "ralph_pp.steps.sandbox._get_head_sha",
+                "ralph_pp.steps.sandbox.get_head_sha",
                 side_effect=_incrementing_sha(),
             ),
             patch(
@@ -1148,9 +1148,9 @@ class TestPreviousFindings:
                     passed=True, findings="LGTM", max_severity=None, minor_only=True
                 ),
             ),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
             patch(
-                "ralph_pp.steps.sandbox._get_head_sha",
+                "ralph_pp.steps.sandbox.get_head_sha",
                 side_effect=_incrementing_sha(),
             ),
             patch(
@@ -1162,9 +1162,8 @@ class TestPreviousFindings:
 
         claude_md = worktree / "scripts" / "ralph" / "CLAUDE.md"
         content = claude_md.read_text()
-        assert content == _ORCHESTRATED_CODER_PROMPT, (
-            "First attempt should use clean prompt without findings"
-        )
+        expected = _ORCHESTRATED_CODER_PROMPT.replace("{story_filter_instruction}", "")
+        assert content == expected, "First attempt should use clean prompt without findings"
 
 
 class TestFindingsNotLeakedAcrossIterations:
@@ -1197,8 +1196,8 @@ class TestFindingsNotLeakedAcrossIterations:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1235,8 +1234,8 @@ class TestSeverityGatedBackout:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1272,8 +1271,8 @@ class TestSeverityGatedBackout:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch("ralph_pp.steps.sandbox._backout_to") as mock_backout,
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
@@ -1303,8 +1302,8 @@ class TestSeverityGatedBackout:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1336,8 +1335,8 @@ class TestSeverityGatedBackout:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1371,8 +1370,8 @@ class TestSeverityGatedBackout:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1440,8 +1439,8 @@ class TestRetryPromptWrapping:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1488,9 +1487,9 @@ class TestCompleteSignalValidation:
                 "ralph_pp.steps.sandbox.subprocess.run",
                 side_effect=mock_subprocess_run,
             ),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
             patch(
-                "ralph_pp.steps.sandbox._get_head_sha",
+                "ralph_pp.steps.sandbox.get_head_sha",
                 side_effect=_incrementing_sha(),
             ),
             patch(
@@ -1545,9 +1544,9 @@ class TestCompleteSignalValidation:
                     minor_only=True,
                 ),
             ),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
             patch(
-                "ralph_pp.steps.sandbox._get_head_sha",
+                "ralph_pp.steps.sandbox.get_head_sha",
                 side_effect=_incrementing_sha(),
             ),
             patch(
@@ -1580,7 +1579,7 @@ class TestIdleDetection:
 
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1618,8 +1617,8 @@ class TestIdleDetection:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=_coder_succeeds),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=mock_sha),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=mock_sha),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
@@ -1646,7 +1645,7 @@ class TestFixerDiffInReview:
             captured_prompt = prompt
             return ToolResult(output="LGTM", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool:
             mock_tool = MagicMock()
             mock_tool.run.side_effect = mock_tool_run
             mock_make_tool.return_value = mock_tool
@@ -1677,7 +1676,7 @@ class TestFixerDiffInReview:
             captured_prompt = prompt
             return ToolResult(output="LGTM", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool:
             mock_tool = MagicMock()
             mock_tool.run.side_effect = mock_tool_run
             mock_make_tool.return_value = mock_tool
@@ -1734,7 +1733,7 @@ class TestTestCommandsGuidance:
             captured_prompt = prompt
             return ToolResult(output="LGTM", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool:
             mock_tool = MagicMock()
             mock_tool.run.side_effect = mock_tool_run
             mock_make_tool.return_value = mock_tool
@@ -1758,7 +1757,7 @@ class TestTestCommandsGuidance:
             captured_prompt = prompt
             return ToolResult(output="LGTM", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool:
             mock_tool = MagicMock()
             mock_tool.run.side_effect = mock_tool_run
             mock_make_tool.return_value = mock_tool
@@ -1785,7 +1784,7 @@ class TestStoryScopedReview:
             captured_prompt = prompt
             return ToolResult(output="LGTM", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.sandbox.make_tool") as mock_make_tool:
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_make_tool:
             mock_tool = MagicMock()
             mock_tool.run.side_effect = mock_tool_run
             mock_make_tool.return_value = mock_tool
@@ -1881,8 +1880,8 @@ class TestStoryScopedReview:
         with (
             patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
             patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
-            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
-            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
             patch(
                 "ralph_pp.steps.sandbox._session_runner_path",
                 return_value=tmp_path / "scripts" / "ralph-single-step.sh",
