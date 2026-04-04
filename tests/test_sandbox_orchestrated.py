@@ -1163,9 +1163,7 @@ class TestPreviousFindings:
         claude_md = worktree / "scripts" / "ralph" / "CLAUDE.md"
         content = claude_md.read_text()
         expected = _ORCHESTRATED_CODER_PROMPT.replace("{story_filter_instruction}", "")
-        assert content == expected, (
-            "First attempt should use clean prompt without findings"
-        )
+        assert content == expected, "First attempt should use clean prompt without findings"
 
 
 class TestFindingsNotLeakedAcrossIterations:

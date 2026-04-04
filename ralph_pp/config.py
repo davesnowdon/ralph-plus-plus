@@ -589,9 +589,7 @@ def _build_config(data: dict[str, Any]) -> Config:
                 o.get("auto_allow_test_commands", defaults.auto_allow_test_commands),
                 defaults.auto_allow_test_commands,
             ),
-            max_idle_iterations=int(
-                o.get("max_idle_iterations", defaults.max_idle_iterations)
-            ),
+            max_idle_iterations=int(o.get("max_idle_iterations", defaults.max_idle_iterations)),
             coder_timeout=int(o.get("coder_timeout", defaults.coder_timeout)),
             reviewer_timeout=int(o.get("reviewer_timeout", defaults.reviewer_timeout)),
             fixer_timeout=int(o.get("fixer_timeout", defaults.fixer_timeout)),

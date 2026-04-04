@@ -235,11 +235,6 @@ def _build_sandbox_command(
     return cmd
 
 
-
-# get_head_sha, get_diff, commit_if_dirty wrappers removed — use
-# get_head_sha, get_diff, commit_if_dirty from ._git directly.
-
-
 def _backout_to(
     worktree_path: Path,
     sha: str,
@@ -376,8 +371,6 @@ def _wrap_retry_findings(findings: str, attempt: int, max_attempts: int) -> str:
     return _RETRY_HEADER.format(attempt=attempt, max_attempts=max_attempts) + findings
 
 
-
-
 # ── Delegated mode ─────────────────────────────────────────────────────
 
 
@@ -424,9 +417,7 @@ def _write_coder_prompt(
     else:
         filter_instruction = ""
 
-    prompt = _ORCHESTRATED_CODER_PROMPT.replace(
-        "{story_filter_instruction}", filter_instruction
-    )
+    prompt = _ORCHESTRATED_CODER_PROMPT.replace("{story_filter_instruction}", filter_instruction)
     if findings:
         prompt += "\n" + findings
     (ralph_dir / "CLAUDE.md").write_text(prompt)
@@ -575,9 +566,7 @@ def _run_fixer_in_sandbox(
     )
 
     # Set RALPH_PROMPT_FILE so the session runner uses the fix prompt
-    env_patch = {
-        "RALPH_PROMPT_FILE": str(worktree_path / "scripts" / "ralph" / ".fix-prompt.md")
-    }
+    env_patch = {"RALPH_PROMPT_FILE": str(worktree_path / "scripts" / "ralph" / ".fix-prompt.md")}
     console.print(f"  [dim]Running fixer ({orch.fixer})...[/dim]")
     try:
         return subprocess.run(
