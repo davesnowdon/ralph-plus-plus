@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -209,33 +209,54 @@ class ToolConfig:
 
 
 @dataclass
-class ReviewConfig:
-    """Base review config — prefer PrdReviewConfig or PostReviewConfig."""
+class PrdReviewConfig:
+    """Review config for PRD review loop."""
 
     reviewer: str = "codex"
-    reviewer_prompt: str = ""
+    reviewer_prompt: str = _PRD_REVIEWER_PROMPT
     fixer: str = "claude"
-    fixer_prompt: str = ""
+    fixer_prompt: str = _PRD_FIXER_PROMPT
     max_cycles: int = 3
     enabled: bool = True
 
 
 @dataclass
-class PrdReviewConfig(ReviewConfig):
-    reviewer_prompt: str = _PRD_REVIEWER_PROMPT
-    fixer_prompt: str = _PRD_FIXER_PROMPT
+class PostReviewConfig:
+    """Review config for post-run review loop."""
 
-
-@dataclass
-class PostReviewConfig(ReviewConfig):
+    reviewer: str = "codex"
     reviewer_prompt: str = _POST_REVIEWER_PROMPT
+    fixer: str = "claude"
     fixer_prompt: str = _POST_FIXER_PROMPT
+    max_cycles: int = 3
+    enabled: bool = True
+
+
+Mode = Literal["delegated", "orchestrated"]
+Severity = Literal["minor", "major", "critical"]
+
+_VALID_MODES: set[str] = {"delegated", "orchestrated"}
+_VALID_SEVERITIES: set[str] = {"minor", "major", "critical"}
+
+
+def parse_mode(value: str) -> Mode:
+    """Validate and narrow a string to a ``Mode`` literal."""
+    if value not in _VALID_MODES:
+        raise ValueError(f"Invalid mode: {value!r} (expected one of {_VALID_MODES})")
+    return cast(Mode, value)
+
+
+def parse_severity(value: str) -> Severity:
+    """Validate and narrow a string to a ``Severity`` literal."""
+    if value not in _VALID_SEVERITIES:
+        raise ValueError(f"Invalid severity: {value!r} (expected one of {_VALID_SEVERITIES})")
+    return cast(Severity, value)
 
 
 @dataclass
 class RalphConfig:
     max_iterations: int = 20
-    mode: str = "delegated"  # "delegated" | "orchestrated"
+    mode: Mode = "delegated"
     sandbox_dir: str = ""  # path to ralph-sandbox checkout
     sandbox_tool: str = "claude"  # tool for sandbox (delegated mode): claude | codex
     session_runner: str = "scripts/ralph-single-step.sh"  # session runner for orchestrated mode
@@ -250,7 +271,7 @@ class OrchestratedConfig:
     run_tests_between_steps: bool = False
     test_commands: list[str] = field(default_factory=lambda: list[str]())
     backout_on_failure: bool = True
-    backout_severity_threshold: str = "major"  # minor | major | critical
+    backout_severity_threshold: Severity = "major"
     auto_allow_test_commands: bool = True
     max_idle_iterations: int = 2
     coder_timeout: int = 1800  # seconds (30 min default)
@@ -259,6 +280,7 @@ class OrchestratedConfig:
     review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
     fix_prompt: str = _ORCHESTRATED_FIX_PROMPT
     prompt_template: str | None = None
+    story_filter: list[str] = field(default_factory=lambda: list[str]())
     max_diff_chars: int = 50_000  # truncate diffs exceeding this size
 
 
@@ -534,7 +556,7 @@ def _build_config(data: dict[str, Any]) -> Config:
         r = data["ralph"]
         cfg.ralph = RalphConfig(
             max_iterations=int(r.get("max_iterations", 20)),
-            mode=r.get("mode", "delegated"),
+            mode=parse_mode(r.get("mode", "delegated")),
             sandbox_dir=r.get("sandbox_dir", ""),
             sandbox_tool=r.get("sandbox_tool", "claude"),
             session_runner=r.get("session_runner", "scripts/ralph-single-step.sh"),
@@ -559,8 +581,8 @@ def _build_config(data: dict[str, Any]) -> Config:
                 o.get("backout_on_failure", defaults.backout_on_failure),
                 defaults.backout_on_failure,
             ),
-            backout_severity_threshold=o.get(
-                "backout_severity_threshold", defaults.backout_severity_threshold
+            backout_severity_threshold=parse_severity(
+                o.get("backout_severity_threshold", defaults.backout_severity_threshold)
             ),
             auto_allow_test_commands=_parse_bool(
                 o.get("auto_allow_test_commands", defaults.auto_allow_test_commands),
@@ -609,9 +631,8 @@ def validate_config(cfg: Config) -> None:
     """Validate config values that would otherwise cause confusing runtime errors."""
     errors: list[str] = []
 
-    valid_modes = {"delegated", "orchestrated"}
-    if cfg.ralph.mode not in valid_modes:
-        errors.append(f"ralph.mode={cfg.ralph.mode!r} not in {valid_modes}")
+    if cfg.ralph.mode not in _VALID_MODES:
+        errors.append(f"ralph.mode={cfg.ralph.mode!r} not in {_VALID_MODES}")
 
     if cfg.prd_tool not in cfg.tools:
         errors.append(f"prd_tool={cfg.prd_tool!r} not in tools {list(cfg.tools)}")
@@ -642,11 +663,10 @@ def validate_config(cfg: Config) -> None:
         if review_cfg.fixer not in cfg.tools:
             errors.append(f"{stage_name}.fixer={review_cfg.fixer!r} not in tools {list(cfg.tools)}")
 
-    valid_severities = {"minor", "major", "critical"}
-    if cfg.orchestrated.backout_severity_threshold not in valid_severities:
+    if cfg.orchestrated.backout_severity_threshold not in _VALID_SEVERITIES:
         errors.append(
             f"orchestrated.backout_severity_threshold="
-            f"{cfg.orchestrated.backout_severity_threshold!r} not in {valid_severities}"
+            f"{cfg.orchestrated.backout_severity_threshold!r} not in {_VALID_SEVERITIES}"
         )
 
     if not isinstance(cfg.orchestrated.test_commands, list):

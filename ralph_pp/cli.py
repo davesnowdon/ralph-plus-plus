@@ -13,6 +13,7 @@ from .config import (
     format_effective_config,
     load_config,
     load_config_with_provenance,
+    parse_mode,
 )
 from .orchestrator import Orchestrator
 
@@ -192,6 +193,13 @@ _sandbox_dir_option = click.option(
     "Skips worktree creation and PRD generation.",
 )
 @click.option(
+    "--story",
+    "story_filter",
+    multiple=True,
+    help="Run only specific stories by ID (e.g. --story US-003 --story US-004). "
+    "Repeatable. When set, other stories are treated as already complete.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -213,6 +221,7 @@ def run(
     prd_file: Path | None,
     manual_prd: bool,
     resume_worktree: Path | None,
+    story_filter: tuple[str, ...],
     dry_run: bool,
 ) -> None:
     """Run the full Ralph agentic coding workflow."""
@@ -242,10 +251,12 @@ def run(
     if max_iters is not None:
         cfg.ralph.max_iterations = max_iters
     if mode is not None:
-        cfg.ralph.mode = mode
+        cfg.ralph.mode = parse_mode(mode)
     if setup_cmd:
         existing = cfg.hooks.get("post_worktree_create", [])
         cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
+    if story_filter:
+        cfg.orchestrated.story_filter = list(story_filter)
 
     orchestrator = Orchestrator(
         feature=feature, config=cfg, dry_run=dry_run, resume_worktree=resume_worktree
@@ -287,6 +298,93 @@ def show_config(
     else:
         cfg = load_config(config_paths, overrides)
         click.echo(format_effective_config(cfg))
+
+
+# ── worktrees subcommand group ────────────────────────────────────────
+
+
+@main.group()
+def worktrees() -> None:
+    """Manage ralph++ git worktrees."""
+
+
+def _find_ralph_worktrees(repo_path: Path) -> list[tuple[str, str]]:
+    """Return ``[(path, branch), ...]`` for all ralph++ worktrees in *repo_path*."""
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    entries: list[tuple[str, str]] = []
+    current_path = ""
+    current_branch = ""
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line.split(" ", 1)[1]
+        elif line.startswith("branch "):
+            current_branch = line.split(" ", 1)[1].removeprefix("refs/heads/")
+        elif line == "":
+            if current_branch.startswith("ralph/"):
+                entries.append((current_path, current_branch))
+            current_path = ""
+            current_branch = ""
+    # Handle last entry (porcelain output may not end with a blank line)
+    if current_branch.startswith("ralph/"):
+        entries.append((current_path, current_branch))
+    return entries
+
+
+@worktrees.command(name="list")
+@_repo_option
+def worktrees_list(repo: Path | None) -> None:
+    """List all ralph++ worktrees for this repo."""
+    entries = _find_ralph_worktrees((repo or Path.cwd()).resolve())
+
+    if not entries:
+        console.print("[dim]No ralph++ worktrees found.[/dim]")
+        return
+
+    for path, branch in entries:
+        console.print(f"  {branch}  →  {path}")
+    console.print(f"\n[dim]{len(entries)} worktree(s)[/dim]")
+
+
+@worktrees.command(name="clean")
+@_repo_option
+@click.option("--force", is_flag=True, default=False, help="Force removal even if dirty.")
+@click.confirmation_option(prompt="Remove all ralph++ worktrees?")
+def worktrees_clean(repo: Path | None, force: bool) -> None:
+    """Remove all ralph++ worktrees and their branches."""
+    import subprocess
+
+    repo_path = (repo or Path.cwd()).resolve()
+    entries = _find_ralph_worktrees(repo_path)
+
+    if not entries:
+        console.print("[dim]No ralph++ worktrees to clean.[/dim]")
+        return
+
+    for path, branch in entries:
+        console.print(f"[yellow]Removing:[/yellow] {path} ({branch})")
+        force_flag = ["--force"] if force else []
+        subprocess.run(
+            ["git", "worktree", "remove", *force_flag, path],
+            cwd=repo_path,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=repo_path,
+            check=False,
+            capture_output=True,
+        )
+
+    console.print(f"[green]✓ Removed {len(entries)} worktree(s)[/green]")
 
 
 if __name__ == "__main__":
