@@ -7,6 +7,7 @@ Supports two modes:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -20,8 +21,8 @@ from rich.console import Console
 
 from ..config import TEST_COMMANDS_GUIDANCE, Config, OrchestratedConfig
 from ..sandbox import resolve_sandbox_dir
-from ..tools import make_tool
 from ..tools.base import parse_max_severity, severity_at_or_above
+from ..tools.cli_tool import CliTool
 from ._git import (
     commit_if_dirty,
     format_test_results,
@@ -42,7 +43,8 @@ You are an autonomous coding agent working on a software project.
 
 1. Read the PRD at `scripts/ralph/prd.json`
 2. Read the progress log at `scripts/ralph/progress.txt` (check Codebase Patterns section first)
-3. Pick the **highest priority** user story where `passes` is `false`
+3. Pick the **highest priority** user story where `passes` is `false`\
+{story_filter_instruction}
 4. Implement that single user story
 5. Run quality checks (e.g., typecheck, lint, test — use whatever your project requires)
 6. If checks pass, commit ALL changes with message: `feat: [Story ID] - [Story Title]`
@@ -233,8 +235,9 @@ def _build_sandbox_command(
     return cmd
 
 
-def _get_head_sha(worktree_path: Path) -> str:
-    return get_head_sha(worktree_path)
+
+# get_head_sha, get_diff, commit_if_dirty wrappers removed — use
+# get_head_sha, get_diff, commit_if_dirty from ._git directly.
 
 
 def _backout_to(
@@ -317,13 +320,23 @@ def load_prd(prd_json: Path) -> dict[str, Any]:
 def read_story_status(prd_json: Path) -> dict[str, bool]:
     """Read prd.json and return ``{story_id: passes}`` mapping."""
     data = load_prd(prd_json)
-    return {s["id"]: bool(s.get("passes", False)) for s in data["userStories"]}
+    result: dict[str, bool] = {}
+    for i, s in enumerate(data["userStories"]):
+        sid = s.get("id")
+        if not sid:
+            raise PrdParseError(f"{prd_json}: userStories[{i}] is missing 'id' field")
+        result[sid] = bool(s.get("passes", False))
+    return result
 
 
 def format_stories(prd_json: Path, story_ids: set[str]) -> str:
     """Extract and format specific stories from prd.json for embedding in prompts."""
     data = load_prd(prd_json)
-    stories = [s for s in data["userStories"] if s["id"] in story_ids]
+    stories = [s for s in data["userStories"] if s.get("id") in story_ids]
+    if story_ids and len(stories) < len(story_ids):
+        found = {s.get("id") for s in stories}
+        missing = story_ids - found
+        logger.warning("Story IDs not found in %s: %s", prd_json, ", ".join(sorted(missing)))
     parts: list[str] = []
     for s in stories:
         criteria = "\n".join(f"  - {c}" for c in s.get("acceptanceCriteria", []))
@@ -363,16 +376,6 @@ def _wrap_retry_findings(findings: str, attempt: int, max_attempts: int) -> str:
     return _RETRY_HEADER.format(attempt=attempt, max_attempts=max_attempts) + findings
 
 
-def _get_diff(worktree_path: Path, from_sha: str) -> str:
-    return get_diff(worktree_path, from_sha)
-
-
-def _commit_if_dirty(worktree_path: Path, message: str) -> bool:
-    """Stage and commit all changes if the working tree has uncommitted work.
-
-    Returns True if a commit was created, False if tree was clean.
-    """
-    return commit_if_dirty(worktree_path, message)
 
 
 # ── Delegated mode ─────────────────────────────────────────────────────
@@ -403,23 +406,42 @@ def _run_delegated(worktree_path: Path, config: Config) -> bool:
 # ── Orchestrated mode ──────────────────────────────────────────────────
 
 
-def _write_coder_prompt(worktree_path: Path, findings: str = "") -> None:
+def _write_coder_prompt(
+    worktree_path: Path,
+    findings: str = "",
+    story_filter: list[str] | None = None,
+) -> None:
     """Write the orchestrated coder prompt, optionally with review findings."""
     ralph_dir = worktree_path / "scripts" / "ralph"
     ralph_dir.mkdir(parents=True, exist_ok=True)
-    prompt = _ORCHESTRATED_CODER_PROMPT
+
+    if story_filter:
+        ids = ", ".join(story_filter)
+        filter_instruction = (
+            f"\n   **IMPORTANT: Only work on these story IDs: {ids}. "
+            "Skip all other stories even if they have `passes` set to `false`.**"
+        )
+    else:
+        filter_instruction = ""
+
+    prompt = _ORCHESTRATED_CODER_PROMPT.replace(
+        "{story_filter_instruction}", filter_instruction
+    )
     if findings:
         prompt += "\n" + findings
     (ralph_dir / "CLAUDE.md").write_text(prompt)
 
 
-def _setup_worktree_files(worktree_path: Path) -> None:
+def _setup_worktree_files(
+    worktree_path: Path,
+    story_filter: list[str] | None = None,
+) -> None:
     """Ensure scripts/ralph/ has the required files for orchestrated mode.
 
     In custom-runner mode the sandbox entrypoint does not copy ralph.sh or
     CLAUDE.md, so ralph++ must set them up before the first iteration.
     """
-    _write_coder_prompt(worktree_path)
+    _write_coder_prompt(worktree_path, story_filter=story_filter)
 
     progress = worktree_path / "scripts" / "ralph" / "progress.txt"
     if not progress.exists():
@@ -459,7 +481,11 @@ def _review_iteration(
 ) -> ReviewResult:
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
-    reviewer = make_tool(orch.reviewer, config)
+    # Apply reviewer_timeout to the tool config if not already set
+    tool_cfg = config.get_tool(orch.reviewer)
+    if orch.reviewer_timeout and not tool_cfg.timeout:
+        tool_cfg = dataclasses.replace(tool_cfg, timeout=orch.reviewer_timeout)
+    reviewer = CliTool(name=orch.reviewer, config=tool_cfg)
 
     # Truncate diffs to prevent exceeding model context windows
     diff = truncate_diff(diff, orch.max_diff_chars)
@@ -549,7 +575,9 @@ def _run_fixer_in_sandbox(
     )
 
     # Set RALPH_PROMPT_FILE so the session runner uses the fix prompt
-    env_patch = {"RALPH_PROMPT_FILE": str(Path("scripts/ralph/.fix-prompt.md"))}
+    env_patch = {
+        "RALPH_PROMPT_FILE": str(worktree_path / "scripts" / "ralph" / ".fix-prompt.md")
+    }
     console.print(f"  [dim]Running fixer ({orch.fixer})...[/dim]")
     try:
         return subprocess.run(
@@ -596,7 +624,7 @@ def _run_orchestrated(
     session_runner = _session_runner_path(config)
 
     # Phase 0: Setup
-    _setup_worktree_files(worktree_path)
+    _setup_worktree_files(worktree_path, story_filter=orch.story_filter or None)
     prd_json = worktree_path / "scripts" / "ralph" / "prd.json"
     if not prd_json.exists():
         raise FileNotFoundError(f"prd.json not found at {prd_json}")
@@ -634,7 +662,7 @@ def _run_orchestrated(
             f"({completed}/{total_stories} stories done) ═══[/bold]"
         )
 
-        pre_sha = _get_head_sha(worktree_path)
+        pre_sha = get_head_sha(worktree_path)
 
         # Snapshot files that must survive git reset --hard during backout.
         # prd.json is re-read each iteration so backout restores the current
@@ -669,13 +697,16 @@ def _run_orchestrated(
                 )
                 iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
                 iter_prompt.write_text(prompt_text)
-                extra_env["RALPH_PROMPT_FILE"] = str(Path("scripts/ralph/.iteration-prompt.md"))
+                extra_env["RALPH_PROMPT_FILE"] = str(
+                    worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
+                )
             elif attempt > 1 and last_findings:
                 # Default prompt flow: append review findings to CLAUDE.md so the
                 # coder knows why its previous attempt was rejected.
                 _write_coder_prompt(
                     worktree_path,
                     findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
+                    story_filter=orch.story_filter or None,
                 )
 
             # Run coder in sandbox
@@ -714,7 +745,7 @@ def _run_orchestrated(
 
             # Check for completion signal — verify against prd.json
             if COMPLETE_SIGNAL in combined_output:
-                _commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
+                commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
                 story_status = read_story_status(prd_json)
                 if all(story_status.values()):
                     console.print("[green]Ralph signaled COMPLETE[/green]")
@@ -727,10 +758,10 @@ def _run_orchestrated(
                 )
 
             # Force-commit any uncommitted coder changes
-            _commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
+            commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
 
             # Idle detection: if coder made no changes, it may have finished
-            post_sha = _get_head_sha(worktree_path)
+            post_sha = get_head_sha(worktree_path)
             if post_sha == pre_sha:
                 consecutive_idle += 1
                 if consecutive_idle >= orch.max_idle_iterations:
@@ -788,7 +819,7 @@ def _run_orchestrated(
                     "(The coder made changes but did not mark any story "
                     "as complete. Review the diff on its own merits.)"
                 )
-            diff = _get_diff(worktree_path, pre_sha)
+            diff = get_diff(worktree_path, pre_sha)
             review = _review_iteration(
                 iteration,
                 diff,
@@ -831,7 +862,7 @@ def _run_orchestrated(
                     console.print(
                         f"  [dim]Fix cycle {fix_cycle}/{orch.max_iteration_retries}[/dim]"
                     )
-                    pre_fix_sha = _get_head_sha(worktree_path)
+                    pre_fix_sha = get_head_sha(worktree_path)
                     fixer_result = _run_fixer_in_sandbox(
                         review.findings, worktree_path, config, stories_text
                     )
@@ -842,11 +873,11 @@ def _run_orchestrated(
                         break
 
                     # Force-commit any uncommitted fixer changes
-                    _commit_if_dirty(
+                    commit_if_dirty(
                         worktree_path,
                         f"ralph: fixer cycle {fix_cycle} iteration {iteration}",
                     )
-                    fix_diff = _get_diff(worktree_path, pre_fix_sha)
+                    fix_diff = get_diff(worktree_path, pre_fix_sha)
 
                     # Re-run tests after fix (if enabled)
                     fix_test_results = ""
@@ -863,7 +894,7 @@ def _run_orchestrated(
                             continue
 
                     # Re-review after fix
-                    diff = _get_diff(worktree_path, pre_sha)
+                    diff = get_diff(worktree_path, pre_sha)
                     review = _review_iteration(
                         iteration,
                         diff,

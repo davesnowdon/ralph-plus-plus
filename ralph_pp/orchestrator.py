@@ -81,12 +81,17 @@ class Orchestrator:
             self._step_sandbox()
             if not skip_post_review:
                 self._step_post_review()
-            self._step_cleanup()
         except Exception as exc:
             failed = True
             console.print("[bold red]\n✗ Workflow failed:[/bold red] " + str(exc))
             raise
         finally:
+            # Always attempt git config cleanup if we have a worktree
+            if self.worktree_path:
+                try:
+                    self._step_cleanup()
+                except Exception:
+                    pass  # Don't mask the original error
             if failed and self.worktree_path:
                 console.print(f"[yellow]Worktree preserved at:[/yellow] {self.worktree_path}")
                 console.print(f"[yellow]Branch:[/yellow] {self.branch}")
@@ -114,6 +119,8 @@ class Orchestrator:
         if not prd_json.exists():
             raise FileNotFoundError(f"prd.json not found in worktree: {prd_json}")
         self.worktree_path = wt
+        # Snapshot config baseline so cleanup works on resume too
+        self._baseline_config_keys = snapshot_local_config(wt)
         # Detect the branch from the worktree
         import subprocess
 
