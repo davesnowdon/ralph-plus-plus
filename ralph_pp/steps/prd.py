@@ -58,30 +58,52 @@ def feature_to_slug(feature: str) -> str:
     return slug
 
 
-def generate_prd(feature: str, worktree_path: Path, config: Config) -> Path:
+def generate_prd(
+    feature: str,
+    worktree_path: Path,
+    config: Config,
+    *,
+    manual: bool = False,
+) -> Path:
     """
     Invoke the Claude /prd skill to generate a text PRD.
     Returns the path to the generated PRD markdown file.
+
+    When *manual* is True the feature description is not sent as a prompt,
+    allowing the user to drive the conversation interactively.
     """
     console.print("[bold cyan]\n── Step: Generate PRD ──[/bold cyan]")
     slug = feature_to_slug(feature)
     prd_filename = f"prd-{slug}.md"
     (worktree_path / "tasks").mkdir(exist_ok=True)
     tool = make_tool(config.prd_tool, config)
-    prompt = (
-        f"Create a PRD for the following feature: {feature}\n\n"
-        "You have the /prd skill available. Use it to generate a detailed Product "
-        "Requirements Document with goals, user stories, acceptance criteria, "
-        "non-goals, and technical considerations.\n\n"
-        f"Save the PRD to tasks/{prd_filename}"
-    )
+
+    if manual:
+        prompt = f"Save the PRD to tasks/{prd_filename} when done."
+    else:
+        prompt = (
+            f"Create a PRD for the following feature: {feature}\n\n"
+            "You have the /prd skill available. Use it to generate a detailed Product "
+            "Requirements Document with goals, user stories, acceptance criteria, "
+            "non-goals, and technical considerations.\n\n"
+            f"Save the PRD to tasks/{prd_filename}"
+        )
+
     tool_cfg = config.get_tool(config.prd_tool)
     if tool_cfg.interactive:
-        console.print(
-            "\n[bold yellow]When Claude finishes generating the PRD, "
-            "type /exit to return to ralph++.\n"
-            "Do not use Ctrl-C — it may corrupt Claude's configuration.[/bold yellow]\n"
-        )
+        if manual:
+            console.print(
+                "\n[bold yellow]You are in an interactive Claude session.\n"
+                f"Use the /prd skill to generate the PRD, then save it to tasks/{prd_filename}\n"
+                "When done, type /exit to return to ralph++.\n"
+                "Do not use Ctrl-C — it may corrupt Claude's configuration.[/bold yellow]\n"
+            )
+        else:
+            console.print(
+                "\n[bold yellow]When Claude finishes generating the PRD, "
+                "type /exit to return to ralph++.\n"
+                "Do not use Ctrl-C — it may corrupt Claude's configuration.[/bold yellow]\n"
+            )
 
     result = tool.run(prompt=prompt, cwd=worktree_path)
     if not result.success:
