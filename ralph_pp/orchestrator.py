@@ -68,13 +68,10 @@ class Orchestrator:
                 return
             if self.resume_worktree:
                 self._step_resume()
-            # Validate sandbox prerequisites before creating the worktree
-            # so we fail fast on misconfiguration (#16).
-            validate_sandbox_prerequisites(self.config)
-            self._step_worktree()
-            if prd_file is not None:
-                self._step_prd_from_file(prd_file)
             else:
+                # Validate sandbox prerequisites before creating the worktree
+                # so we fail fast on misconfiguration (#16).
+                validate_sandbox_prerequisites(self.config)
                 self._step_worktree()
                 if prd_file is not None:
                     self._step_prd_from_file(prd_file)

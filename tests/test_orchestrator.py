@@ -74,7 +74,10 @@ class TestResumeWorktree:
     @patch.object(Orchestrator, "_step_cleanup")
     @patch.object(Orchestrator, "_step_post_review")
     @patch.object(Orchestrator, "_step_sandbox")
-    def test_resume_skips_worktree_and_prd(self, mock_sandbox, mock_post, mock_clean, tmp_path):
+    @patch("ralph_pp.orchestrator.validate_sandbox_prerequisites")
+    def test_resume_skips_worktree_and_prd(
+        self, mock_validate, mock_sandbox, mock_post, mock_clean, tmp_path
+    ):
         from ralph_pp.config import Config
 
         cfg = Config.__new__(Config)
@@ -91,6 +94,18 @@ class TestResumeWorktree:
         import subprocess
 
         subprocess.run(["git", "init"], cwd=wt, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=wt,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=wt,
+            check=True,
+            capture_output=True,
+        )
         subprocess.run(
             ["git", "commit", "--allow-empty", "-m", "init"],
             cwd=wt,
