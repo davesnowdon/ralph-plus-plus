@@ -1768,3 +1768,41 @@ class TestStoryScopedReview:
 
         with pytest.raises(PrdParseError, match="missing 'userStories' key"):
             read_story_status(prd_json)
+
+    def test_no_story_completed_uses_fallback_scope(self, tmp_path):
+        """When coder makes changes but marks no story complete, the reviewer
+        should get a fallback note instead of all incomplete stories."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path, max_iterations=1, max_iteration_retries=0, backout_on_failure=False
+        )
+
+        captured_stories_arg = None
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            # Coder runs but does NOT update prd.json — no story marked complete
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            nonlocal captured_stories_arg
+            captured_stories_arg = kwargs.get("stories_under_review", "")
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox._get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        assert captured_stories_arg is not None
+        assert "did not mark any story" in captured_stories_arg
