@@ -11,7 +11,6 @@ import dataclasses
 import json
 import logging
 import os
-import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +29,7 @@ from ._git import (
     get_head_sha,
     run_test_commands_with_output,
 )
+from ._prompts import render_prompt
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -262,30 +262,6 @@ def _backout_to(
             path.write_text(content)
 
 
-_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
-
-
-def _render_prompt(template: str, **kwargs: str) -> str:
-    """Substitute placeholders in a prompt template.
-
-    Warns about any ``{placeholder}`` tokens that were not substituted,
-    since a typo (e.g. ``{diff_output}`` instead of ``{diff}``) would
-    silently pass the literal token to the model.
-    """
-    result = template
-    for key, value in kwargs.items():
-        result = result.replace("{" + key + "}", value)
-
-    remaining = _PLACEHOLDER_RE.findall(result)
-    if remaining:
-        logger.warning(
-            "Prompt template has unsubstituted placeholders: %s (available: %s)",
-            ", ".join(f"{{{p}}}" for p in remaining),
-            ", ".join(f"{{{k}}}" for k in kwargs),
-        )
-    return result
-
-
 def _test_commands_guidance(orch: OrchestratedConfig) -> str:
     """Build test-command guidance block for reviewer prompts, or empty string."""
     if not orch.test_commands:
@@ -499,7 +475,7 @@ def _review_iteration(
     else:
         context = ""
 
-    review_prompt = _render_prompt(
+    review_prompt = render_prompt(
         orch.review_prompt,
         diff=diff,
         stories_under_review=stories_under_review,
@@ -546,7 +522,7 @@ def _run_fixer_in_sandbox(
 ) -> subprocess.CompletedProcess[str]:
     """Invoke the fixer agent inside the sandbox with the fix prompt."""
     orch = config.orchestrated
-    fix_prompt = _render_prompt(
+    fix_prompt = render_prompt(
         orch.fix_prompt,
         findings=findings,
         stories_under_review=stories_under_review,
@@ -677,7 +653,7 @@ def _run_orchestrated(
             if orch.prompt_template is not None:
                 progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
                 progress_text = progress_file.read_text() if progress_file.exists() else ""
-                prompt_text = _render_prompt(
+                prompt_text = render_prompt(
                     orch.prompt_template,
                     iteration=str(iteration),
                     prd_file=str(prd_json),

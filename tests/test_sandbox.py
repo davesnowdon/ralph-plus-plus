@@ -4,9 +4,9 @@ import tempfile
 from pathlib import Path
 
 from ralph_pp.config import load_config
+from ralph_pp.steps._prompts import render_prompt
 from ralph_pp.steps.sandbox import (
     _build_sandbox_command,
-    _render_prompt,
     _run_delegated,
 )
 
@@ -109,20 +109,20 @@ def test_build_sandbox_command_passes_config_dirs(tmp_path):
     assert "--codex-config-dir" in cmd
 
 
-def test_render_prompt():
+def testrender_prompt():
     """Prompt template placeholders are substituted."""
     template = "Review {diff} against {prd_file}"
-    result = _render_prompt(template, diff="my diff", prd_file="/path/prd.json")
+    result = render_prompt(template, diff="my diff", prd_file="/path/prd.json")
     assert result == "Review my diff against /path/prd.json"
 
 
-def test_render_prompt_missing_placeholder(caplog):
+def testrender_prompt_missing_placeholder(caplog):
     """Missing placeholders are left as-is and a warning is emitted."""
     import logging
 
     template = "Review {diff} and {unknown}"
     with caplog.at_level(logging.WARNING, logger="ralph_pp.steps.sandbox"):
-        result = _render_prompt(template, diff="changes")
+        result = render_prompt(template, diff="changes")
     assert result == "Review changes and {unknown}"
     assert "unsubstituted placeholders" in caplog.text
     assert "{unknown}" in caplog.text
