@@ -26,8 +26,17 @@ class TestWorktreePreservedOnFailure:
     @patch.object(Orchestrator, "_step_sandbox", side_effect=RuntimeError("docker crashed"))
     @patch.object(Orchestrator, "_step_prd")
     @patch.object(Orchestrator, "_step_worktree")
+    @patch("ralph_pp.orchestrator.validate_sandbox_prerequisites")
     def test_worktree_path_reported_on_failure(
-        self, mock_wt, mock_prd, mock_sandbox, mock_post, mock_clean, tmp_path, capsys
+        self,
+        mock_validate,
+        mock_wt,
+        mock_prd,
+        mock_sandbox,
+        mock_post,
+        mock_clean,
+        tmp_path,
+        capsys,
     ):
         orch = self._make_orchestrator(tmp_path)
 
@@ -45,7 +54,10 @@ class TestWorktreePreservedOnFailure:
         assert "Worktree preserved at:" in captured or str(tmp_path / "worktree") in captured
 
     @patch.object(Orchestrator, "_step_worktree", side_effect=RuntimeError("git failed"))
-    def test_no_worktree_message_when_worktree_not_created(self, mock_wt, tmp_path, capsys):
+    @patch("ralph_pp.orchestrator.validate_sandbox_prerequisites")
+    def test_no_worktree_message_when_worktree_not_created(
+        self, mock_validate, mock_wt, tmp_path, capsys
+    ):
         orch = self._make_orchestrator(tmp_path)
         orch.worktree_path = None  # not yet created
 
