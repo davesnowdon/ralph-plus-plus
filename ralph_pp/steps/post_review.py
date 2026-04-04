@@ -11,7 +11,7 @@ from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
 from ..tools import make_tool, make_tool_with_permissions
 from ._git import format_test_results, get_diff, get_head_sha, run_test_commands_with_output
 from .prd import MaxCyclesAbort, prompt_max_cycles
-from .sandbox import BASE_SHA_FILE, format_all_completed
+from .sandbox import BASE_SHA_FILE, truncate_diff, format_all_completed
 
 console = Console()
 
@@ -68,6 +68,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
     if base_sha_path.exists():
         base_sha = base_sha_path.read_text().strip()
         full_diff = get_diff(worktree_path, base_sha)
+        full_diff = truncate_diff(full_diff, config.orchestrated.max_diff_chars)
         diff_text = f"\n## Git diff (all changes since run start)\n\n{full_diff}\n"
     else:
         diff_text = ""

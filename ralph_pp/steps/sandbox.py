@@ -422,6 +422,16 @@ class ReviewResult:
     minor_only: bool  # True when all findings are minor (or LGTM)
 
 
+def truncate_diff(diff: str, max_chars: int) -> str:
+    """Truncate a diff to *max_chars* with a note if truncated."""
+    if max_chars <= 0 or len(diff) <= max_chars:
+        return diff
+    return (
+        diff[:max_chars] + f"\n\n... [diff truncated at {max_chars} characters; "
+        f"{len(diff) - max_chars} characters omitted] ..."
+    )
+
+
 def _review_iteration(
     iteration: int,
     diff: str,
@@ -435,6 +445,11 @@ def _review_iteration(
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
     reviewer = make_tool(orch.reviewer, config)
+
+    # Truncate diffs to prevent exceeding model context windows
+    diff = truncate_diff(diff, orch.max_diff_chars)
+    if fixer_diff:
+        fixer_diff = truncate_diff(fixer_diff, orch.max_diff_chars)
 
     if previous_findings:
         context = (
