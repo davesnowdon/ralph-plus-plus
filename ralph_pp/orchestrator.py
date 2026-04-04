@@ -52,6 +52,7 @@ class Orchestrator:
             return
 
         start_time = time.monotonic()
+        failed = False
         try:
             if prd_only:
                 self._step_prd_only(skip_prd_review, manual_prd=manual_prd)
@@ -66,8 +67,16 @@ class Orchestrator:
                 self._step_post_review()
             self._step_cleanup()
         except Exception as exc:
+            failed = True
             console.print("[bold red]\n✗ Workflow failed:[/bold red] " + str(exc))
             raise
+        finally:
+            if failed and self.worktree_path:
+                console.print(f"[yellow]Worktree preserved at:[/yellow] {self.worktree_path}")
+                console.print(f"[yellow]Branch:[/yellow] {self.branch}")
+                console.print(
+                    f"[dim]Clean up manually with: git worktree remove {self.worktree_path}[/dim]"
+                )
 
         elapsed = time.monotonic() - start_time
         self._print_summary(elapsed, skip_post_review)
