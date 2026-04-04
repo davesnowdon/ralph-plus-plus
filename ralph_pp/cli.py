@@ -280,13 +280,10 @@ def worktrees() -> None:
     """Manage ralph++ git worktrees."""
 
 
-@worktrees.command(name="list")
-@_repo_option
-def worktrees_list(repo: Path | None) -> None:
-    """List all ralph++ worktrees for this repo."""
+def _find_ralph_worktrees(repo_path: Path) -> list[tuple[str, str]]:
+    """Return ``[(path, branch), ...]`` for all ralph++ worktrees in *repo_path*."""
     import subprocess
 
-    repo_path = (repo or Path.cwd()).resolve()
     result = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         cwd=repo_path,
@@ -295,32 +292,38 @@ def worktrees_list(repo: Path | None) -> None:
         check=True,
     )
 
-    worktree_entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, str]] = []
     current_path = ""
     current_branch = ""
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
             current_path = line.split(" ", 1)[1]
         elif line.startswith("branch "):
-            current_branch = line.split(" ", 1)[1]
-            # refs/heads/ralph/... → ralph/...
-            current_branch = current_branch.removeprefix("refs/heads/")
+            current_branch = line.split(" ", 1)[1].removeprefix("refs/heads/")
         elif line == "":
             if current_branch.startswith("ralph/"):
-                worktree_entries.append((current_path, current_branch))
+                entries.append((current_path, current_branch))
             current_path = ""
             current_branch = ""
-    # Handle last entry
+    # Handle last entry (porcelain output may not end with a blank line)
     if current_branch.startswith("ralph/"):
-        worktree_entries.append((current_path, current_branch))
+        entries.append((current_path, current_branch))
+    return entries
 
-    if not worktree_entries:
+
+@worktrees.command(name="list")
+@_repo_option
+def worktrees_list(repo: Path | None) -> None:
+    """List all ralph++ worktrees for this repo."""
+    entries = _find_ralph_worktrees((repo or Path.cwd()).resolve())
+
+    if not entries:
         console.print("[dim]No ralph++ worktrees found.[/dim]")
         return
 
-    for path, branch in worktree_entries:
+    for path, branch in entries:
         console.print(f"  {branch}  →  {path}")
-    console.print(f"\n[dim]{len(worktree_entries)} worktree(s)[/dim]")
+    console.print(f"\n[dim]{len(entries)} worktree(s)[/dim]")
 
 
 @worktrees.command(name="clean")
@@ -332,35 +335,13 @@ def worktrees_clean(repo: Path | None, force: bool) -> None:
     import subprocess
 
     repo_path = (repo or Path.cwd()).resolve()
-    result = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=repo_path,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    entries = _find_ralph_worktrees(repo_path)
 
-    worktree_entries: list[tuple[str, str]] = []
-    current_path = ""
-    current_branch = ""
-    for line in result.stdout.splitlines():
-        if line.startswith("worktree "):
-            current_path = line.split(" ", 1)[1]
-        elif line.startswith("branch "):
-            current_branch = line.split(" ", 1)[1].removeprefix("refs/heads/")
-        elif line == "":
-            if current_branch.startswith("ralph/"):
-                worktree_entries.append((current_path, current_branch))
-            current_path = ""
-            current_branch = ""
-    if current_branch.startswith("ralph/"):
-        worktree_entries.append((current_path, current_branch))
-
-    if not worktree_entries:
+    if not entries:
         console.print("[dim]No ralph++ worktrees to clean.[/dim]")
         return
 
-    for path, branch in worktree_entries:
+    for path, branch in entries:
         console.print(f"[yellow]Removing:[/yellow] {path} ({branch})")
         force_flag = ["--force"] if force else []
         subprocess.run(
@@ -375,7 +356,7 @@ def worktrees_clean(repo: Path | None, force: bool) -> None:
             capture_output=True,
         )
 
-    console.print(f"[green]✓ Removed {len(worktree_entries)} worktree(s)[/green]")
+    console.print(f"[green]✓ Removed {len(entries)} worktree(s)[/green]")
 
 
 if __name__ == "__main__":
