@@ -696,15 +696,17 @@ def _run_orchestrated(
                         _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                         continue
 
-            # Review changes — scope to newly-completed stories only
-            stories_text = (
-                format_stories(prd_json, newly_completed)
-                if newly_completed
-                else format_stories(
-                    prd_json,
-                    {sid for sid, p in curr_story_status.items() if not p},
+            # Review changes — scope to newly-completed stories only.
+            # When no story was marked complete, tell the reviewer to
+            # evaluate the diff on its own rather than scoping to all
+            # incomplete stories (which would be noisy and misleading).
+            if newly_completed:
+                stories_text = format_stories(prd_json, newly_completed)
+            else:
+                stories_text = (
+                    "(The coder made changes but did not mark any story "
+                    "as complete. Review the diff on its own merits.)"
                 )
-            )
             diff = _get_diff(worktree_path, pre_sha)
             review = _review_iteration(
                 iteration,
