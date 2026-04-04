@@ -106,9 +106,11 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
             else:
                 guidance = ""
 
-            # Pre-run tests so the reviewer gets concrete results
+            # Pre-run tests so the reviewer gets concrete results.
+            # Respect run_tests_between_steps — if the user disabled tests
+            # during orchestrated iterations, skip them here too (#14).
             test_results_text = ""
-            if test_cmds:
+            if test_cmds and config.orchestrated.run_tests_between_steps:
                 console.print("  [dim]Running test commands before review...[/dim]")
                 tests_ok, test_output = run_test_commands_with_output(worktree_path, test_cmds)
                 status_str = "PASSED" if tests_ok else "FAILED"
