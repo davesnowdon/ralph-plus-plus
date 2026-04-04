@@ -8,6 +8,8 @@ Supports two modes:
 from __future__ import annotations
 
 import json
+import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +29,7 @@ from ._git import (
     run_test_commands_with_output,
 )
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 _ORCHESTRATED_CODER_PROMPT = """\
@@ -251,11 +254,27 @@ def _backout_to(
             path.write_text(content)
 
 
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
 def _render_prompt(template: str, **kwargs: str) -> str:
-    """Substitute placeholders in a prompt template."""
+    """Substitute placeholders in a prompt template.
+
+    Warns about any ``{placeholder}`` tokens that were not substituted,
+    since a typo (e.g. ``{diff_output}`` instead of ``{diff}``) would
+    silently pass the literal token to the model.
+    """
     result = template
     for key, value in kwargs.items():
         result = result.replace("{" + key + "}", value)
+
+    remaining = _PLACEHOLDER_RE.findall(result)
+    if remaining:
+        logger.warning(
+            "Prompt template has unsubstituted placeholders: %s (available: %s)",
+            ", ".join(f"{{{p}}}" for p in remaining),
+            ", ".join(f"{{{k}}}" for k in kwargs),
+        )
     return result
 
 
