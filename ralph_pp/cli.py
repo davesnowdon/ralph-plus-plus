@@ -272,5 +272,111 @@ def show_config(
         click.echo(format_effective_config(cfg))
 
 
+# ── worktrees subcommand group ────────────────────────────────────────
+
+
+@main.group()
+def worktrees() -> None:
+    """Manage ralph++ git worktrees."""
+
+
+@worktrees.command(name="list")
+@_repo_option
+def worktrees_list(repo: Path | None) -> None:
+    """List all ralph++ worktrees for this repo."""
+    import subprocess
+
+    repo_path = (repo or Path.cwd()).resolve()
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    worktree_entries: list[tuple[str, str]] = []
+    current_path = ""
+    current_branch = ""
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line.split(" ", 1)[1]
+        elif line.startswith("branch "):
+            current_branch = line.split(" ", 1)[1]
+            # refs/heads/ralph/... → ralph/...
+            current_branch = current_branch.removeprefix("refs/heads/")
+        elif line == "":
+            if current_branch.startswith("ralph/"):
+                worktree_entries.append((current_path, current_branch))
+            current_path = ""
+            current_branch = ""
+    # Handle last entry
+    if current_branch.startswith("ralph/"):
+        worktree_entries.append((current_path, current_branch))
+
+    if not worktree_entries:
+        console.print("[dim]No ralph++ worktrees found.[/dim]")
+        return
+
+    for path, branch in worktree_entries:
+        console.print(f"  {branch}  →  {path}")
+    console.print(f"\n[dim]{len(worktree_entries)} worktree(s)[/dim]")
+
+
+@worktrees.command(name="clean")
+@_repo_option
+@click.option("--force", is_flag=True, default=False, help="Force removal even if dirty.")
+@click.confirmation_option(prompt="Remove all ralph++ worktrees?")
+def worktrees_clean(repo: Path | None, force: bool) -> None:
+    """Remove all ralph++ worktrees and their branches."""
+    import subprocess
+
+    repo_path = (repo or Path.cwd()).resolve()
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    worktree_entries: list[tuple[str, str]] = []
+    current_path = ""
+    current_branch = ""
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line.split(" ", 1)[1]
+        elif line.startswith("branch "):
+            current_branch = line.split(" ", 1)[1].removeprefix("refs/heads/")
+        elif line == "":
+            if current_branch.startswith("ralph/"):
+                worktree_entries.append((current_path, current_branch))
+            current_path = ""
+            current_branch = ""
+    if current_branch.startswith("ralph/"):
+        worktree_entries.append((current_path, current_branch))
+
+    if not worktree_entries:
+        console.print("[dim]No ralph++ worktrees to clean.[/dim]")
+        return
+
+    for path, branch in worktree_entries:
+        console.print(f"[yellow]Removing:[/yellow] {path} ({branch})")
+        force_flag = ["--force"] if force else []
+        subprocess.run(
+            ["git", "worktree", "remove", *force_flag, path],
+            cwd=repo_path,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=repo_path,
+            check=False,
+            capture_output=True,
+        )
+
+    console.print(f"[green]✓ Removed {len(worktree_entries)} worktree(s)[/green]")
+
+
 if __name__ == "__main__":
     main()
