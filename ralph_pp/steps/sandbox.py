@@ -543,6 +543,11 @@ def _run_orchestrated(worktree_path: Path, config: Config) -> bool:
         counters.write_text(f"iterations={iters}\nretries={total_retries}\n")
 
     for iteration in range(1, config.ralph.max_iterations + 1):
+        # Reset findings at the start of each outer iteration so that
+        # stale context from a previous iteration does not suppress
+        # legitimate findings in the current one (#32).
+        last_findings = ""
+
         completed = sum(1 for v in prev_story_status.values() if v)
         console.print(
             f"\n[bold]═══ Iteration {iteration}/{config.ralph.max_iterations} "
