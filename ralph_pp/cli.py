@@ -186,6 +186,13 @@ _sandbox_dir_option = click.option(
     "auto-prompting the feature description. Use the /prd skill manually.",
 )
 @click.option(
+    "--resume-worktree",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Resume a crashed run from an existing worktree. "
+    "Skips worktree creation and PRD generation.",
+)
+@click.option(
     "--story",
     "story_filter",
     multiple=True,
@@ -213,17 +220,25 @@ def run(
     prd_only: bool,
     prd_file: Path | None,
     manual_prd: bool,
+    resume_worktree: Path | None,
     story_filter: tuple[str, ...],
     dry_run: bool,
 ) -> None:
     """Run the full Ralph agentic coding workflow."""
     if prd_only and prd_file:
         raise click.UsageError("--prd-only and --prd-file are mutually exclusive.")
+    if resume_worktree and (prd_only or prd_file):
+        raise click.UsageError(
+            "--resume-worktree cannot be combined with --prd-only or --prd-file."
+        )
 
     # Derive feature from PRD filename when not explicitly provided.
     if feature is None and prd_file is not None:
         stem = prd_file.stem  # e.g. "prd-my-feature"
         feature = stem.removeprefix("prd-") if stem.startswith("prd-") else stem
+    # For resume, derive feature from the worktree directory name
+    if feature is None and resume_worktree is not None:
+        feature = resume_worktree.name
     if feature is None:
         raise click.UsageError("--feature is required (or provide --prd-file to derive it).")
 
@@ -243,7 +258,9 @@ def run(
     if story_filter:
         cfg.orchestrated.story_filter = list(story_filter)
 
-    orchestrator = Orchestrator(feature=feature, config=cfg, dry_run=dry_run)
+    orchestrator = Orchestrator(
+        feature=feature, config=cfg, dry_run=dry_run, resume_worktree=resume_worktree
+    )
     orchestrator.run(
         skip_prd_review=skip_prd_review,
         skip_post_review=skip_post_review,
