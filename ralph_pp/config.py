@@ -259,6 +259,7 @@ class OrchestratedConfig:
     review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
     fix_prompt: str = _ORCHESTRATED_FIX_PROMPT
     prompt_template: str | None = None
+    story_filter: list[str] = field(default_factory=lambda: list[str]())
     max_diff_chars: int = 50_000  # truncate diffs exceeding this size
 
 
