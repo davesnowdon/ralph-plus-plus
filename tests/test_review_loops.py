@@ -592,3 +592,98 @@ class TestPostReviewDiff:
             "prompt", reviewer_mock.run.call_args[0][0] if reviewer_mock.run.call_args[0] else ""
         )
         assert "all changes since run start" not in prompt
+
+
+class TestPostReviewRespectsTestFlag:
+    """Post-review loop must respect run_tests_between_steps flag (#14)."""
+
+    def test_tests_skipped_when_flag_false(self, tmp_path):
+        from ralph_pp.config import OrchestratedConfig
+
+        config = _make_config(
+            post_review=PostReviewConfig(
+                reviewer="codex",
+                fixer="claude",
+                max_cycles=1,
+            ),
+        )
+        config.orchestrated = OrchestratedConfig(
+            test_commands=["pytest"],
+            run_tests_between_steps=False,
+        )
+
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_aug,
+            patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+            ) as mock_run_tests,
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: minor\nfoo")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+            mock_make_aug.side_effect = lambda name, cfg, cmds: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            with pytest.raises(MaxCyclesAbort):
+                post_review_loop(tmp_path, config)
+
+        mock_run_tests.assert_not_called()
+
+    def test_tests_run_when_flag_true(self, tmp_path):
+        from ralph_pp.config import OrchestratedConfig
+
+        config = _make_config(
+            post_review=PostReviewConfig(
+                reviewer="codex",
+                fixer="claude",
+                max_cycles=1,
+            ),
+        )
+        config.orchestrated = OrchestratedConfig(
+            test_commands=["pytest"],
+            run_tests_between_steps=True,
+        )
+
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.make_tool_with_permissions") as mock_make_aug,
+            patch("ralph_pp.steps.post_review.prompt_max_cycles", return_value="quit"),
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, "all passed"),
+            ) as mock_run_tests,
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: minor\nfoo")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+            mock_make_aug.side_effect = lambda name, cfg, cmds: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            with pytest.raises(MaxCyclesAbort):
+                post_review_loop(tmp_path, config)
+
+        mock_run_tests.assert_called()
