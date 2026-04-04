@@ -126,7 +126,8 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
             result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
             if not result.success:
                 raise RuntimeError(
-                    f"Post-run reviewer failed (exit {result.exit_code}): {result.output[:200]}"
+                    f"Post-run reviewer failed (exit {result.exit_code}): "
+                    f"{(result.output or result.stderr)[:200]}"
                 )
 
             if result.is_lgtm:
@@ -145,7 +146,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
             if not fix_result.success:
                 raise RuntimeError(
                     f"Post-run fixer failed (exit {fix_result.exit_code}): "
-                    f"{fix_result.output[:200]}"
+                    f"{(fix_result.output or fix_result.stderr)[:200]}"
                 )
             last_fixer_diff = get_diff(worktree_path, pre_fix_sha)
 

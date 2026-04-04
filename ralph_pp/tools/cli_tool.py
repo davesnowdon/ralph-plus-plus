@@ -91,7 +91,8 @@ class CliTool(BaseTool):
             console.print("[dim]" + result.stderr + "[/dim]")
 
         return ToolResult(
-            output=result.stdout + result.stderr,
+            output=result.stdout,
             exit_code=result.returncode,
             success=result.returncode == 0,
+            stderr=result.stderr,
         )
