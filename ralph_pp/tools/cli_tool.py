@@ -76,14 +76,24 @@ class CliTool(BaseTool):
                 success=result.returncode == 0,
             )
 
-        result = subprocess.run(
-            args,
-            cwd=cwd,
-            env=env,
-            input=stdin_data,
-            text=True,
-            capture_output=True,
-        )
+        timeout = self.config.timeout if self.config.timeout > 0 else None
+        try:
+            result = subprocess.run(
+                args,
+                cwd=cwd,
+                env=env,
+                input=stdin_data,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResult(
+                output="",
+                exit_code=1,
+                success=False,
+                stderr=f"Process timed out after {timeout}s",
+            )
 
         if result.stdout:
             console.print(result.stdout)

@@ -521,7 +521,17 @@ def _run_fixer_in_sandbox(
     # Set RALPH_PROMPT_FILE so the session runner uses the fix prompt
     env_patch = {"RALPH_PROMPT_FILE": str(Path("scripts/ralph/.fix-prompt.md"))}
     console.print(f"  [dim]Running fixer ({orch.fixer})...[/dim]")
-    return subprocess.run(cmd, text=True, capture_output=True, env=_merge_env(env_patch))
+    try:
+        return subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            env=_merge_env(env_patch),
+            timeout=orch.fixer_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        console.print(f"  [red]✗ Fixer timed out after {orch.fixer_timeout}s[/red]")
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="timeout")
 
 
 def _merge_env(extra: dict[str, str]) -> dict[str, str]:
@@ -635,12 +645,17 @@ def _run_orchestrated(
                 ralph_args=["1"],
             )
             console.print(f"  [dim]Running coder ({orch.coder})...[/dim]")
-            result = subprocess.run(
-                cmd,
-                text=True,
-                capture_output=True,
-                env=_merge_env(extra_env) if extra_env else None,
-            )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    text=True,
+                    capture_output=True,
+                    env=_merge_env(extra_env) if extra_env else None,
+                    timeout=orch.coder_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                console.print(f"  [red]✗ Coder timed out after {orch.coder_timeout}s[/red]")
+                result = subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="timeout")
 
             combined_output = (result.stdout or "") + (result.stderr or "")
             if combined_output:
