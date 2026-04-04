@@ -72,8 +72,6 @@ def _build_overrides(
     overrides: dict[str, Any] = {}
     if repo:
         overrides["repo_path"] = repo
-    elif repo is None:
-        overrides["repo_path"] = Path.cwd()
     if claude_config:
         overrides["claude_config_dir"] = claude_config
     if codex_config:
