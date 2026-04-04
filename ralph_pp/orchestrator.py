@@ -27,10 +27,17 @@ console = Console()
 
 
 class Orchestrator:
-    def __init__(self, feature: str, config: Config, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        feature: str,
+        config: Config,
+        dry_run: bool = False,
+        resume_worktree: Path | None = None,
+    ) -> None:
         self.feature = feature
         self.config = config
         self.dry_run = dry_run
+        self.resume_worktree = resume_worktree
         self.worktree_path: Path | None = None
         self.branch: str | None = None
         self._run_summary: RunSummary | None = None
@@ -57,11 +64,14 @@ class Orchestrator:
             if prd_only:
                 self._step_prd_only(skip_prd_review, manual_prd=manual_prd)
                 return
-            self._step_worktree()
-            if prd_file is not None:
-                self._step_prd_from_file(prd_file)
+            if self.resume_worktree:
+                self._step_resume()
             else:
-                self._step_prd(skip_prd_review, manual_prd=manual_prd)
+                self._step_worktree()
+                if prd_file is not None:
+                    self._step_prd_from_file(prd_file)
+                else:
+                    self._step_prd(skip_prd_review, manual_prd=manual_prd)
             self._step_sandbox()
             if not skip_post_review:
                 self._step_post_review()
@@ -82,6 +92,31 @@ class Orchestrator:
         self._print_summary(elapsed, skip_post_review)
 
     # ── Steps ──────────────────────────────────────────────────────────
+
+    def _step_resume(self) -> None:
+        """Resume from an existing worktree — skip worktree creation and PRD."""
+        assert self.resume_worktree is not None
+        console.print(Rule("[bold]Resuming[/bold]"))
+        wt = self.resume_worktree.resolve()
+        if not wt.is_dir():
+            raise FileNotFoundError(f"Worktree directory not found: {wt}")
+        prd_json = wt / "scripts" / "ralph" / "prd.json"
+        if not prd_json.exists():
+            raise FileNotFoundError(f"prd.json not found in worktree: {prd_json}")
+        self.worktree_path = wt
+        # Detect the branch from the worktree
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=wt,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.branch = result.stdout.strip()
+        console.print(f"[green]✓ Resuming worktree:[/green] {wt}")
+        console.print(f"[green]  Branch:[/green] {self.branch}")
 
     def _step_worktree(self) -> None:
         console.print(Rule("[bold]1 · Worktree[/bold]"))

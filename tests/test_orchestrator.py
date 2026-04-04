@@ -54,3 +54,52 @@ class TestWorktreePreservedOnFailure:
 
         captured = capsys.readouterr().out
         assert "Worktree preserved" not in captured
+
+
+class TestResumeWorktree:
+    """--resume-worktree should skip worktree creation and PRD, go straight to sandbox."""
+
+    @patch.object(Orchestrator, "_step_cleanup")
+    @patch.object(Orchestrator, "_step_post_review")
+    @patch.object(Orchestrator, "_step_sandbox")
+    def test_resume_skips_worktree_and_prd(self, mock_sandbox, mock_post, mock_clean, tmp_path):
+        from ralph_pp.config import Config
+
+        cfg = Config.__new__(Config)
+
+        # Set up a fake worktree with prd.json
+        wt = tmp_path / "worktree"
+        wt.mkdir()
+        (wt / "scripts" / "ralph").mkdir(parents=True)
+        (wt / "scripts" / "ralph" / "prd.json").write_text(
+            '{"userStories": [{"id": "US-001", "passes": false}]}'
+        )
+
+        # Init a git repo in the worktree so rev-parse works
+        import subprocess
+
+        subprocess.run(["git", "init"], cwd=wt, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=wt,
+            check=True,
+            capture_output=True,
+        )
+
+        orch = Orchestrator("test-feature", cfg, resume_worktree=wt)
+        orch.run()
+
+        assert orch.worktree_path == wt
+        assert orch.branch is not None
+        mock_sandbox.assert_called_once()
+
+    def test_resume_fails_if_no_prd_json(self, tmp_path):
+        from ralph_pp.config import Config
+
+        cfg = Config.__new__(Config)
+        wt = tmp_path / "worktree"
+        wt.mkdir()
+
+        orch = Orchestrator("test-feature", cfg, resume_worktree=wt)
+        with pytest.raises(FileNotFoundError, match="prd.json"):
+            orch.run()
