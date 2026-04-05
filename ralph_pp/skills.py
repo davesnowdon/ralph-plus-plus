@@ -49,8 +49,8 @@ def _plugin_search_dirs(claude_config_dir: Path) -> list[Path]:
                 if candidate.is_dir():
                     dirs.append(candidate)
 
-    # Local marketplace
-    local_plugins = _LOCAL_MARKETPLACE / "plugins"
+    # Local marketplace — derive from claude_config_dir, not a hardcoded path (#88)
+    local_plugins = claude_config_dir / "plugins" / "local" / "plugins"
     if local_plugins.is_dir() and local_plugins not in dirs:
         dirs.append(local_plugins)
 

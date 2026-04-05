@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -91,7 +93,7 @@ class Orchestrator:
                 try:
                     self._step_cleanup()
                 except Exception:
-                    pass  # Don't mask the original error
+                    logging.getLogger(__name__).debug("Cleanup failed", exc_info=True)
             if failed and self.worktree_path:
                 console.print(f"[yellow]Worktree preserved at:[/yellow] {self.worktree_path}")
                 console.print(f"[yellow]Branch:[/yellow] {self.branch}")
@@ -101,7 +103,7 @@ class Orchestrator:
                 try:
                     run_hooks("post_failure", self.config.hooks, self.worktree_path)
                 except Exception:
-                    pass  # Don't mask the original error
+                    logging.getLogger(__name__).debug("post_failure hook failed", exc_info=True)
 
         elapsed = time.monotonic() - start_time
         self._print_summary(elapsed, skip_post_review)
@@ -112,6 +114,10 @@ class Orchestrator:
         """Resume from an existing worktree — skip worktree creation and PRD."""
         assert self.resume_worktree is not None
         console.print(Rule("[bold]Resuming[/bold]"))
+
+        # Validate sandbox prerequisites early so failures are clear (#75)
+        validate_sandbox_prerequisites(self.config)
+
         wt = self.resume_worktree.resolve()
         if not wt.is_dir():
             raise FileNotFoundError(f"Worktree directory not found: {wt}")
@@ -122,8 +128,6 @@ class Orchestrator:
         # Snapshot config baseline so cleanup works on resume too
         self._baseline_config_keys = snapshot_local_config(wt)
         # Detect the branch from the worktree
-        import subprocess
-
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=wt,

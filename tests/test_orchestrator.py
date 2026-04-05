@@ -120,7 +120,8 @@ class TestResumeWorktree:
         assert orch.branch is not None
         mock_sandbox.assert_called_once()
 
-    def test_resume_fails_if_no_prd_json(self, tmp_path):
+    @patch("ralph_pp.orchestrator.validate_sandbox_prerequisites")
+    def test_resume_fails_if_no_prd_json(self, mock_validate, tmp_path):
         from ralph_pp.config import Config
 
         cfg = Config.__new__(Config)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -429,8 +430,6 @@ class ConfigProvenance:
 
     def format(self, config: Config) -> str:
         """Format provenance as a human-readable table."""
-        import dataclasses
-
         lines: list[str] = []
 
         def _walk(obj: Any, prefix: str = "") -> None:
@@ -676,6 +675,11 @@ def validate_config(cfg: Config) -> None:
             f"{cfg.orchestrated.backout_severity_threshold!r} not in {_VALID_SEVERITIES}"
         )
 
+    for attr in ("coder_timeout", "reviewer_timeout", "fixer_timeout"):
+        val = getattr(cfg.orchestrated, attr)
+        if val < 0:
+            errors.append(f"orchestrated.{attr} must be >= 0, got {val}")
+
     if not isinstance(cfg.orchestrated.test_commands, list):
         errors.append(
             "orchestrated.test_commands must be a list, "
@@ -692,7 +696,6 @@ def validate_config(cfg: Config) -> None:
 
 def format_effective_config(config: Config) -> str:
     """Return a human-readable YAML dump of the effective config."""
-    import dataclasses
 
     def _convert(obj: Any) -> Any:
         if isinstance(obj, Path):

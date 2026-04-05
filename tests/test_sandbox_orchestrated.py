@@ -1561,13 +1561,88 @@ class TestCompleteSignalValidation:
             "Should continue iterating when COMPLETE signal but stories incomplete"
         )
 
+    def test_complete_with_story_filter_checks_only_filtered_stories(self, tmp_path):
+        """COMPLETE signal with story filter should only check filtered story status (#86)."""
+        worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+
+        import json
+
+        # US-001 is done, US-002 is not — but we only filter on US-001
+        prd_data = {
+            "userStories": [
+                {"id": "US-001", "title": "Done", "passes": True},
+                {"id": "US-002", "title": "Not targeted", "passes": False},
+            ]
+        }
+        prd_json.write_text(json.dumps(prd_data))
+
+        config = _make_config(tmp_path, max_iterations=3, max_iteration_retries=0)
+        config.orchestrated.story_filter = ["US-001"]
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="done\n<promise>COMPLETE</promise>\n")
+
+        with (
+            patch(
+                "ralph_pp.steps.sandbox.subprocess.run",
+                side_effect=mock_subprocess_run,
+            ),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox.get_head_sha",
+                side_effect=_incrementing_sha(),
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        # Should succeed — US-001 passes and US-002 is outside the filter
+        assert result is True
+
+    def test_unknown_story_filter_ids_raise_error(self, tmp_path):
+        """Unknown story IDs in --story filter should raise ValueError (#85)."""
+        worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+
+        import json
+
+        prd_data = {"userStories": [{"id": "US-001", "title": "Story", "passes": False}]}
+        prd_json.write_text(json.dumps(prd_data))
+
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=0)
+        config.orchestrated.story_filter = ["US-999"]
+
+        with (
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+            pytest.raises(ValueError, match="Unknown story IDs"),
+        ):
+            _run_orchestrated(worktree, config)
+
 
 class TestIdleDetection:
     """Orchestrated mode should terminate early when no changes are made."""
 
     def test_idle_detection_returns_true_after_threshold(self, tmp_path):
-        """When coder makes no changes for max_idle_iterations, treat as complete."""
+        """Idle detection with completed stories returns True."""
         worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+
+        import json
+
+        prd_data = {"userStories": [{"id": "US-001", "title": "Done", "passes": True}]}
+        prd_json.write_text(json.dumps(prd_data))
+
         config = _make_config(tmp_path, max_iterations=5, max_iteration_retries=0)
         config.orchestrated.max_idle_iterations = 2
 
@@ -1589,9 +1664,46 @@ class TestIdleDetection:
 
         assert result is True, "Should return True (treat as complete) after idle threshold"
 
+    def test_idle_detection_returns_false_when_no_stories_complete(self, tmp_path):
+        """When coder makes no changes but no stories passed, return False (#87)."""
+        worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+
+        import json
+
+        prd_data = {"userStories": [{"id": "US-001", "title": "Not done", "passes": False}]}
+        prd_json.write_text(json.dumps(prd_data))
+
+        config = _make_config(tmp_path, max_iterations=5, max_iteration_retries=0)
+        config.orchestrated.max_idle_iterations = 2
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="same_sha")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False, "Should return False when idle but no stories complete"
+
     def test_idle_counter_resets_on_changes(self, tmp_path):
         """When the coder makes changes, the idle counter resets."""
         worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+
+        import json
+
+        prd_data = {"userStories": [{"id": "US-001", "title": "Done", "passes": True}]}
+        prd_json.write_text(json.dumps(prd_data))
+
         config = _make_config(tmp_path, max_iterations=4, max_iteration_retries=0)
         config.orchestrated.max_idle_iterations = 2
 
@@ -1766,6 +1878,76 @@ class TestTestCommandsGuidance:
 
         assert captured_prompt is not None
         assert "Do NOT run bare pytest" not in captured_prompt
+
+
+class TestReviewerPermissions:
+    """Orchestrated reviewer should augment Bash permissions (#89)."""
+
+    def test_reviewer_gets_bash_permissions_for_test_commands(self, tmp_path):
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, test_commands=["hatch run ci"])
+        config.orchestrated.auto_allow_test_commands = True
+        # Use claude (which has allowed_tools) as reviewer so permissions can be augmented
+        config.orchestrated.reviewer = "claude"
+
+        captured_config = None
+
+        def mock_cli_tool_init(self_tool, name, config):
+            nonlocal captured_config
+            captured_config = config
+
+        mock_tool = MagicMock()
+        mock_tool.run.return_value = ToolResult(output="LGTM", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_cls:
+            mock_cls.return_value = mock_tool
+            mock_cls.side_effect = None
+
+            # Capture the config passed to CliTool
+            def capture_init(name, config):
+                nonlocal captured_config
+                captured_config = config
+                return mock_tool
+
+            mock_cls.side_effect = capture_init
+
+            _review_iteration(iteration=1, diff="diff", worktree_path=worktree, config=config)
+
+        assert captured_config is not None
+        assert captured_config.allowed_tools is not None
+        # Should include a Bash(...) permission for hatch
+        bash_perms = [t for t in captured_config.allowed_tools if t.startswith("Bash(")]
+        assert len(bash_perms) > 0, "Reviewer should have Bash permissions for test commands"
+
+    def test_reviewer_no_extra_permissions_when_auto_allow_disabled(self, tmp_path):
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, test_commands=["hatch run ci"])
+        config.orchestrated.auto_allow_test_commands = False
+
+        captured_config = None
+
+        mock_tool = MagicMock()
+        mock_tool.run.return_value = ToolResult(output="LGTM", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_cls:
+
+            def capture_init(name, config):
+                nonlocal captured_config
+                captured_config = config
+                return mock_tool
+
+            mock_cls.side_effect = capture_init
+
+            _review_iteration(iteration=1, diff="diff", worktree_path=worktree, config=config)
+
+        assert captured_config is not None
+        # Should NOT have extra Bash permissions
+        original_tools = config.get_tool(config.orchestrated.reviewer).allowed_tools
+        assert captured_config.allowed_tools == original_tools
 
 
 class TestStoryScopedReview:
