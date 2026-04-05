@@ -121,11 +121,23 @@ def testrender_prompt_missing_placeholder(caplog):
     import logging
 
     template = "Review {diff} and {unknown}"
-    with caplog.at_level(logging.WARNING, logger="ralph_pp.steps.sandbox"):
+    with caplog.at_level(logging.WARNING, logger="ralph_pp.steps._prompts"):
         result = render_prompt(template, diff="changes")
     assert result == "Review changes and {unknown}"
     assert "unsubstituted placeholders" in caplog.text
     assert "{unknown}" in caplog.text
+
+
+def testrender_prompt_no_false_positive_from_substituted_content(caplog):
+    """Placeholders inside substituted values should not trigger warnings."""
+    import logging
+
+    template = "Review this diff:\n{diff}"
+    diff_with_braces = 'def validate(ts):\n    raise ValueError(f"{param_name} must be UTC")'
+    with caplog.at_level(logging.WARNING, logger="ralph_pp.steps._prompts"):
+        result = render_prompt(template, diff=diff_with_braces)
+    assert "{param_name}" in result
+    assert "unsubstituted placeholders" not in caplog.text
 
 
 def test_delegated_mode_integration(tmp_path):
