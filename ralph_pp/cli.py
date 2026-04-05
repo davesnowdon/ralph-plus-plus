@@ -401,6 +401,7 @@ def worktrees_clean(repo: Path | None, force: bool) -> None:
         console.print(f"[green]✓ Removed {removed} worktree(s)[/green]")
     if failed:
         console.print(f"[red]✗ Failed to remove {failed} worktree(s)[/red]")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

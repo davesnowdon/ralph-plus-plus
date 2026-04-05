@@ -104,3 +104,32 @@ class TestWorktreesClean:
         assert result.exit_code == 0
         assert "Removed 1 worktree" in result.output
         assert not wt.exists()
+
+    def test_clean_exits_nonzero_on_partial_failure(self, tmp_path: Path):
+        """When some worktrees fail to remove (dirty), exit code should be 1."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+
+        wt = tmp_path / "ralph-dirty-test"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "ralph/dirty-test", str(wt)],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        # Make the worktree dirty so git refuses to remove it without --force
+        (wt / "untracked.txt").write_text("dirty")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["worktrees", "clean", "--repo", str(repo), "--yes"])
+        assert result.exit_code == 1
+        assert "Failed to remove" in result.output
+
+        # Cleanup
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(wt)],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
