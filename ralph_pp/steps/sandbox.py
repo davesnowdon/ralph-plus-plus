@@ -22,6 +22,7 @@ from ..config import TEST_COMMANDS_GUIDANCE, Config, OrchestratedConfig
 from ..sandbox import resolve_sandbox_dir
 from ..tools.base import parse_max_severity, severity_at_or_above
 from ..tools.cli_tool import CliTool
+from ..tools.permissions import bash_permissions_from_commands
 from ._git import (
     commit_if_dirty,
     format_test_results,
@@ -456,8 +457,6 @@ def _review_iteration(
     # Use the tool factory to augment Bash permissions when auto_allow_test_commands
     # is enabled, matching the post_review path (#89).
     if orch.auto_allow_test_commands and orch.test_commands and tool_cfg.allowed_tools:
-        from ..tools.permissions import bash_permissions_from_commands
-
         extra = bash_permissions_from_commands(orch.test_commands)
         tool_cfg = dataclasses.replace(
             tool_cfg,

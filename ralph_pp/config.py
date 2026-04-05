@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -429,8 +430,6 @@ class ConfigProvenance:
 
     def format(self, config: Config) -> str:
         """Format provenance as a human-readable table."""
-        import dataclasses
-
         lines: list[str] = []
 
         def _walk(obj: Any, prefix: str = "") -> None:
@@ -697,7 +696,6 @@ def validate_config(cfg: Config) -> None:
 
 def format_effective_config(config: Config) -> str:
     """Return a human-readable YAML dump of the effective config."""
-    import dataclasses
 
     def _convert(obj: Any) -> Any:
         if isinstance(obj, Path):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -310,8 +311,6 @@ def worktrees() -> None:
 
 def _find_ralph_worktrees(repo_path: Path) -> list[tuple[str, str]]:
     """Return ``[(path, branch), ...]`` for all ralph++ worktrees in *repo_path*."""
-    import subprocess
-
     try:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
@@ -366,8 +365,6 @@ def worktrees_list(repo: Path | None) -> None:
 @click.confirmation_option(prompt="Remove all ralph++ worktrees?")
 def worktrees_clean(repo: Path | None, force: bool) -> None:
     """Remove all ralph++ worktrees and their branches."""
-    import subprocess
-
     repo_path = (repo or Path.cwd()).resolve()
     entries = _find_ralph_worktrees(repo_path)
 
