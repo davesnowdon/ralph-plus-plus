@@ -112,3 +112,38 @@ def cleanup_git_config(worktree_path: Path, baseline_keys: set[str] | None = Non
         console.print(f"[green]✓ Removed {removed} local git config key(s)[/green]")
     else:
         console.print("[green]✓ No local git config to clean up[/green]")
+
+
+# Internal orchestration files that should not appear in the final commit.
+_ORCHESTRATION_ARTIFACTS = [
+    "scripts/ralph/.base-sha",
+    "scripts/ralph/.fix-prompt.md",
+]
+
+
+def cleanup_orchestration_artifacts(worktree_path: Path) -> None:
+    """Remove internal orchestration files from the worktree and stage the deletions."""
+    removed = 0
+    for rel_path in _ORCHESTRATION_ARTIFACTS:
+        artifact = worktree_path / rel_path
+        if artifact.exists():
+            artifact.unlink()
+            removed += 1
+
+    if removed:
+        # Stage the deletions so the next commit (or amend) picks them up
+        subprocess.run(
+            ["git", "add", "-A", "scripts/ralph/"],
+            cwd=worktree_path,
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "ralph: remove orchestration artifacts"],
+            cwd=worktree_path,
+            check=False,
+            capture_output=True,
+        )
+        console.print(f"[green]✓ Removed {removed} orchestration artifact(s)[/green]")
+    else:
+        console.print("[green]✓ No orchestration artifacts to clean up[/green]")
