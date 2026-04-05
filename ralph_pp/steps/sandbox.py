@@ -452,6 +452,17 @@ def _review_iteration(
     tool_cfg = config.get_tool(orch.reviewer)
     if orch.reviewer_timeout and not tool_cfg.timeout:
         tool_cfg = dataclasses.replace(tool_cfg, timeout=orch.reviewer_timeout)
+
+    # Use the tool factory to augment Bash permissions when auto_allow_test_commands
+    # is enabled, matching the post_review path (#89).
+    if orch.auto_allow_test_commands and orch.test_commands and tool_cfg.allowed_tools:
+        from ..tools.permissions import bash_permissions_from_commands
+
+        extra = bash_permissions_from_commands(orch.test_commands)
+        tool_cfg = dataclasses.replace(
+            tool_cfg,
+            allowed_tools=list(tool_cfg.allowed_tools) + extra,
+        )
     reviewer = CliTool(name=orch.reviewer, config=tool_cfg)
 
     # Truncate diffs to prevent exceeding model context windows
@@ -550,7 +561,7 @@ def _run_fixer_in_sandbox(
             text=True,
             capture_output=True,
             env=_merge_env(env_patch),
-            timeout=orch.fixer_timeout,
+            timeout=orch.fixer_timeout or None,
         )
     except subprocess.TimeoutExpired:
         console.print(f"  [red]✗ Fixer timed out after {orch.fixer_timeout}s[/red]")
@@ -600,12 +611,14 @@ def _run_orchestrated(
     prev_story_status = read_story_status(prd_json)
 
     # Apply story filter: treat non-filtered stories as already complete
+    filter_set: set[str] | None = None
     if orch.story_filter:
         filter_set = set(orch.story_filter)
         unknown = filter_set - set(prev_story_status)
         if unknown:
-            console.print(
-                f"[yellow]⚠ Unknown story IDs in filter: {', '.join(sorted(unknown))}[/yellow]"
+            raise ValueError(
+                f"Unknown story IDs in --story filter: {', '.join(sorted(unknown))}. "
+                f"Valid IDs: {', '.join(sorted(prev_story_status))}"
             )
         for sid in prev_story_status:
             if sid not in filter_set:
@@ -689,7 +702,7 @@ def _run_orchestrated(
                     text=True,
                     capture_output=True,
                     env=_merge_env(extra_env) if extra_env else None,
-                    timeout=orch.coder_timeout,
+                    timeout=orch.coder_timeout or None,
                 )
             except subprocess.TimeoutExpired:
                 console.print(f"  [red]✗ Coder timed out after {orch.coder_timeout}s[/red]")
@@ -712,10 +725,15 @@ def _run_orchestrated(
             if COMPLETE_SIGNAL in combined_output:
                 commit_if_dirty(worktree_path, f"ralph: coder iteration {iteration}")
                 story_status = read_story_status(prd_json)
-                if all(story_status.values()):
+                # When a story filter is active, only check filtered stories (#86)
+                if filter_set:
+                    relevant = {sid: v for sid, v in story_status.items() if sid in filter_set}
+                else:
+                    relevant = story_status
+                if all(relevant.values()):
                     console.print("[green]Ralph signaled COMPLETE[/green]")
                     return True
-                incomplete = [sid for sid, p in story_status.items() if not p]
+                incomplete = [sid for sid, p in relevant.items() if not p]
                 console.print(
                     f"[yellow]Ralph signaled COMPLETE but {len(incomplete)} stories "
                     f"still have passes=false: {', '.join(sorted(incomplete))} — "
@@ -730,11 +748,25 @@ def _run_orchestrated(
             if post_sha == pre_sha:
                 consecutive_idle += 1
                 if consecutive_idle >= orch.max_idle_iterations:
+                    # Verify at least one story completed before declaring success (#87)
+                    idle_status = read_story_status(prd_json)
+                    if filter_set:
+                        idle_relevant = {s: v for s, v in idle_status.items() if s in filter_set}
+                    else:
+                        idle_relevant = idle_status
+                    any_complete = any(idle_relevant.values())
+                    if any_complete:
+                        console.print(
+                            f"[green]No changes for {consecutive_idle} consecutive "
+                            "iterations — treating as complete[/green]"
+                        )
+                        return True
                     console.print(
-                        f"[green]No changes for {consecutive_idle} consecutive iterations "
-                        "— treating as complete[/green]"
+                        f"[yellow]No changes for {consecutive_idle} consecutive "
+                        "iterations but no stories are complete — treating as "
+                        "failure[/yellow]"
                     )
-                    return True
+                    return False
                 console.print(
                     f"  [dim]No changes this iteration "
                     f"(idle {consecutive_idle}/{orch.max_idle_iterations})[/dim]"
@@ -884,6 +916,11 @@ def _run_orchestrated(
 
         # Update story status for next iteration
         prev_story_status = read_story_status(prd_json)
+        # Re-apply story filter so non-targeted stories stay marked complete (#86)
+        if filter_set:
+            for sid in prev_story_status:
+                if sid not in filter_set:
+                    prev_story_status[sid] = True
 
         # Append to progress (skip idle iterations — the coder writes its own
         # detailed entries via the orchestrated prompt)

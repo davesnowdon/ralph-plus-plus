@@ -676,6 +676,11 @@ def validate_config(cfg: Config) -> None:
             f"{cfg.orchestrated.backout_severity_threshold!r} not in {_VALID_SEVERITIES}"
         )
 
+    for attr in ("coder_timeout", "reviewer_timeout", "fixer_timeout"):
+        val = getattr(cfg.orchestrated, attr)
+        if val < 0:
+            errors.append(f"orchestrated.{attr} must be >= 0, got {val}")
+
     if not isinstance(cfg.orchestrated.test_commands, list):
         errors.append(
             "orchestrated.test_commands must be a list, "
