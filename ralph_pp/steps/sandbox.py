@@ -921,6 +921,9 @@ def _run_orchestrated(
                 if sid not in filter_set:
                     prev_story_status[sid] = True
 
+        updated_completed = sum(1 for v in prev_story_status.values() if v)
+        console.print(f"  [dim]Progress: {updated_completed}/{total_stories} stories done[/dim]")
+
         # Append to progress (skip idle iterations — the coder writes its own
         # detailed entries via the orchestrated prompt)
         if consecutive_idle == 0:
@@ -929,6 +932,13 @@ def _run_orchestrated(
             status = "passed" if iteration_passed else "failed"
             with open(progress_file, "a") as f:
                 f.write(f"\n## Iteration {iteration} — {status}\n---\n")
+
+        # Early termination: if all stories are complete after this iteration,
+        # skip remaining iterations instead of waiting for the coder to emit
+        # a COMPLETE signal (#92).
+        if iteration_passed and prev_story_status and all(prev_story_status.values()):
+            console.print("[green]All stories complete — finishing early[/green]")
+            return True
 
     console.print(
         f"[yellow]Reached max iterations ({config.ralph.max_iterations}) "
