@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -78,17 +79,31 @@ def format_test_results(test_output: str, passed: bool) -> str:
     )
 
 
+_SHELL_META = frozenset("&|;<>()$`\\\"'*?[#~=!{}")
+
+
+def _needs_shell(cmd: str) -> bool:
+    """Return True if *cmd* contains shell metacharacters requiring shell=True."""
+    return any(ch in _SHELL_META for ch in cmd)
+
+
 def run_test_commands_with_output(worktree_path: Path, commands: list[str]) -> tuple[bool, str]:
     """Run test/lint commands, capturing output.
+
+    Simple commands (no shell metacharacters) are executed with
+    ``shell=False`` via :func:`shlex.split` to avoid shell-injection risks.
+    Commands that contain pipes, redirects, or other shell syntax are still
+    executed with ``shell=True``.
 
     Returns ``(all_passed, combined_output)``.
     """
     output_parts: list[str] = []
     for cmd in commands:
         output_parts.append(f"$ {cmd}")
+        use_shell = _needs_shell(cmd)
         result = subprocess.run(
-            cmd,
-            shell=True,
+            cmd if use_shell else shlex.split(cmd),
+            shell=use_shell,
             cwd=worktree_path,
             capture_output=True,
             text=True,
