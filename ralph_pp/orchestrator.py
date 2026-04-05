@@ -23,7 +23,12 @@ from .steps.prd import (
     review_prd_loop,
 )
 from .steps.sandbox import RunSummary, run_sandbox, validate_sandbox_prerequisites
-from .steps.worktree import cleanup_git_config, create_worktree, snapshot_local_config
+from .steps.worktree import (
+    cleanup_git_config,
+    cleanup_orchestration_artifacts,
+    create_worktree,
+    snapshot_local_config,
+)
 
 console = Console()
 
@@ -215,6 +220,7 @@ class Orchestrator:
     def _step_cleanup(self) -> None:
         assert self.worktree_path is not None
         console.print(Rule("[bold]5 · Cleanup[/bold]"))
+        cleanup_orchestration_artifacts(self.worktree_path)
         cleanup_git_config(self.worktree_path, self._baseline_config_keys)
         run_hooks("post_complete", self.config.hooks, self.worktree_path)
 
