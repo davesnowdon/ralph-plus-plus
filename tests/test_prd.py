@@ -289,8 +289,8 @@ class TestReviewPrdJsonLoop:
             assert mock_reviewer.run.call_count == 2
             assert mock_fixer.run.call_count == 1
 
-    def test_max_cycles_exhaustion_continues(self, tmp_path):
-        """Max cycles reached without LGTM warns but continues."""
+    def test_max_cycles_exhaustion_prompts_user(self, tmp_path):
+        """Max cycles reached without LGTM prompts user (quit/retry/continue)."""
         config = _make_config()
         prd_file = tmp_path / "tasks" / "prd.md"
         prd_file.parent.mkdir(parents=True)
@@ -306,14 +306,17 @@ class TestReviewPrdJsonLoop:
         )
         fix_result = ToolResult(output="Attempted fix", exit_code=0, success=True)
 
-        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.prompt_max_cycles", return_value="continue"),
+        ):
             mock_reviewer = MagicMock()
             mock_reviewer.run.return_value = issue_result
             mock_fixer = MagicMock()
             mock_fixer.run.return_value = fix_result
             mock_make.side_effect = [mock_reviewer, mock_fixer]
 
-            # Should not raise — just warns and continues
+            # Should not raise — user chose "continue"
             review_prd_json_loop(prd_file, prd_json, tmp_path, config)
 
             # Default max_cycles is 2
