@@ -26,7 +26,27 @@ the project may require specific virtual environments or configurations."""
 _PRD_REVIEWER_PROMPT = """\
 Read the PRD at {prd_file}.
 
-Evaluate whether it is:
+Before evaluating the PRD as a document, perform a feasibility check
+against the actual codebase at {repo_path}:
+
+1. Identify every type, class, schema, or interface the PRD references
+   (e.g., dataclasses, Protocol classes, SQLite DDL, database models).
+2. Read the source files where those types are defined.
+3. For each field in the PRD's canonical contracts, verify:
+   - The corresponding field in the existing codebase type has a
+     compatible type (e.g., nullable vs non-nullable)
+   - Any schema constraints (NOT NULL, foreign keys, defaults) are
+     compatible with the PRD's stated behavioral guarantees
+   - The PRD's migration/compatibility claims (e.g., "no schema
+     migration needed") are true given the actual schema
+4. For each acceptance criterion that asserts exact round-trip behavior,
+   verify the underlying storage layer can represent all values in the
+   contract's type (e.g., can the column store NULL if the field is
+   Optional?)
+
+Flag any feasibility issue as severity: critical.
+
+Then evaluate the PRD as a document:
 - complete
 - unambiguous
 - implementable as a sequence of small independent user stories
@@ -67,6 +87,58 @@ Requirements:
 - do not add speculative scope that is not justified by the feature request or findings
 
 Do not output a summary instead of making the edits. Update the PRD itself."""
+
+_PRD_JSON_REVIEW_PROMPT = """\
+You are reviewing a generated prd.json against the original PRD and
+the codebase to catch criteria that were sharpened, invented, or made
+infeasible during the conversion from PRD markdown to structured JSON.
+
+Inputs:
+- Original PRD: {prd_file}
+- Generated prd.json: {prd_json_file}
+- Codebase root: {repo_path}
+
+For each user story in prd.json:
+
+1. **Traceability**: Verify every acceptance criterion traces back to
+   a requirement in the original PRD. Flag any criterion that was
+   invented during conversion and has no basis in the PRD.
+
+2. **Faithfulness**: Verify the criterion accurately represents the
+   PRD's intent. Flag any criterion that tightens a constraint beyond
+   what the PRD specifies (e.g., "all fields match exactly" when the
+   PRD allows semantic equivalence for certain fields).
+
+3. **Feasibility**: For criteria that reference codebase types or
+   schemas, verify the criterion is satisfiable given the actual types.
+   Read the relevant source files if needed.
+
+4. **Independence**: Verify the story can be implemented without
+   depending on stories with higher priority numbers.
+
+If prd.json is faithful, feasible, and traceable, output exactly:
+LGTM
+
+Otherwise, output a numbered list of issues.
+
+For each issue include:
+- severity: critical | major | minor
+- story: the story ID (e.g., US-004)
+- criterion: the specific acceptance criterion
+- problem: what is wrong
+- recommended fix: how to adjust the criterion in prd.json
+
+Do not rewrite prd.json yourself. Only review it."""
+
+_PRD_JSON_FIXER_PROMPT = """\
+Fix the following issues in {prd_json_file} based on the original PRD
+at {prd_file}.
+
+{findings}
+
+Update prd.json in place. Do not modify the PRD markdown.
+Only adjust acceptance criteria to resolve the flagged issues.
+Preserve story IDs, priorities, and overall structure."""
 
 _POST_REVIEWER_PROMPT = """\
 Review the implementation against ONLY the completed user stories listed below.
@@ -196,6 +268,53 @@ Requirements:
 If some finding is invalid or already resolved, handle that
 conservatively and focus on the remaining real issues."""
 
+_ORCHESTRATED_REVIEW_FIRST_PROMPT = """\
+Review the latest iteration against ONLY the user stories listed below.
+Do NOT evaluate against stories that are not listed here.
+
+## Stories under review
+
+{stories_under_review}
+
+## Feasibility pre-check
+
+Before reviewing the diff, check whether each acceptance criterion above
+is structurally satisfiable:
+1. Read the original types/schemas of the files touched by the diff
+2. If any criterion requires exact round-trip of a value that the
+   underlying storage cannot represent (e.g., None in a NOT NULL column),
+   flag it as: severity: critical, problem: "criterion unsatisfiable"
+
+## Git diff
+
+{diff}
+{previous_findings}
+You may inspect the changed files and nearby code as needed.
+
+Check for:
+- requirement mismatches against the acceptance criteria above
+- broken or incomplete behavior
+- regressions
+- missing edge-case handling
+- unsafe assumptions
+- missing tests or inadequate test updates
+
+If the iteration is acceptable, output exactly:
+LGTM
+
+Otherwise, output a numbered list of findings.
+
+For each finding include:
+- severity: critical | major | minor
+- file: exact path(s) if applicable
+- problem: what is wrong, risky, or incomplete
+- evidence: what in the diff or code supports the finding
+- recommended fix: the smallest reasonable corrective action
+
+Only report findings that materially affect correctness, completeness, or reliability.
+{test_commands_guidance}
+{test_results}"""
+
 
 @dataclass
 class ToolConfig:
@@ -218,6 +337,18 @@ class PrdReviewConfig:
     fixer: str = "claude"
     fixer_prompt: str = _PRD_FIXER_PROMPT
     max_cycles: int = 3
+    enabled: bool = True
+
+
+@dataclass
+class PrdJsonReviewConfig:
+    """Review config for prd.json validation after conversion."""
+
+    reviewer: str = "codex"
+    reviewer_prompt: str = _PRD_JSON_REVIEW_PROMPT
+    fixer: str = "claude"
+    fixer_prompt: str = _PRD_JSON_FIXER_PROMPT
+    max_cycles: int = 2
     enabled: bool = True
 
 
@@ -279,6 +410,7 @@ class OrchestratedConfig:
     reviewer_timeout: int = 300  # seconds (5 min default)
     fixer_timeout: int = 600  # seconds (10 min default)
     review_prompt: str = _ORCHESTRATED_REVIEW_PROMPT
+    first_review_prompt: str = _ORCHESTRATED_REVIEW_FIRST_PROMPT
     fix_prompt: str = _ORCHESTRATED_FIX_PROMPT
     prompt_template: str | None = None
     story_filter: list[str] = field(default_factory=lambda: list[str]())
@@ -303,6 +435,7 @@ class Config:
 
     # Review stages
     prd_review: PrdReviewConfig = field(default_factory=PrdReviewConfig)
+    prd_json_review: PrdJsonReviewConfig = field(default_factory=PrdJsonReviewConfig)
     post_review: PostReviewConfig = field(default_factory=PostReviewConfig)
 
     # Ralph
@@ -549,6 +682,8 @@ def _build_config(data: dict[str, Any]) -> Config:
 
     if "prd_review" in data:
         cfg.prd_review = _parse_review(data["prd_review"], cfg.prd_review)
+    if "prd_json_review" in data:
+        cfg.prd_json_review = _parse_review(data["prd_json_review"], cfg.prd_json_review)
     if "post_review" in data:
         cfg.post_review = _parse_review(data["post_review"], cfg.post_review)
 
@@ -593,6 +728,7 @@ def _build_config(data: dict[str, Any]) -> Config:
             reviewer_timeout=int(o.get("reviewer_timeout", defaults.reviewer_timeout)),
             fixer_timeout=int(o.get("fixer_timeout", defaults.fixer_timeout)),
             review_prompt=o.get("review_prompt", defaults.review_prompt),
+            first_review_prompt=o.get("first_review_prompt", defaults.first_review_prompt),
             fix_prompt=o.get("fix_prompt", defaults.fix_prompt),
             prompt_template=o.get("prompt_template", defaults.prompt_template),
             story_filter=o.get("story_filter", defaults.story_filter),

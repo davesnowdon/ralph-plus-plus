@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import click
 from rich.console import Console
 
 from ..config import TEST_COMMANDS_GUIDANCE, Config, OrchestratedConfig
@@ -446,6 +447,7 @@ def _review_iteration(
     fixer_diff: str = "",
     stories_under_review: str = "",
     test_results: str = "",
+    first_review: bool = False,
 ) -> ReviewResult:
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
@@ -485,8 +487,12 @@ def _review_iteration(
     else:
         context = ""
 
+    # Use the feasibility-aware prompt for the first review of each iteration
+    prompt_template = (
+        orch.first_review_prompt if first_review and not previous_findings else orch.review_prompt
+    )
     review_prompt = render_prompt(
-        orch.review_prompt,
+        prompt_template,
         diff=diff,
         stories_under_review=stories_under_review,
         previous_findings=context,
@@ -824,6 +830,7 @@ def _run_orchestrated(
                 previous_findings=last_findings,
                 stories_under_review=stories_text,
                 test_results=test_results_text,
+                first_review=True,
             )
             last_findings = review.findings
 
@@ -852,6 +859,8 @@ def _run_orchestrated(
                     return False
             else:
                 # PATH B: Invoke fixer to fix in-place
+                prev_fix_findings: str = ""
+                escalation_count = 0
                 for fix_cycle in range(1, orch.max_iteration_retries + 1):
                     total_retries += 1
                     counters["retries"] = total_retries
@@ -905,6 +914,36 @@ def _run_orchestrated(
                     if review.passed:
                         iteration_passed = True
                         break
+
+                    # Detect escalating findings — new issues each cycle
+                    # suggests a spec-level problem, not an implementation bug
+                    if prev_fix_findings and review.findings != prev_fix_findings:
+                        escalation_count += 1
+                    prev_fix_findings = review.findings
+
+                    if escalation_count >= 2:
+                        console.print(
+                            f"\n  [bold yellow]⚠ Fix cycles for iteration {iteration} "
+                            f"show escalating findings (new issues each cycle)."
+                            f"[/bold yellow]\n"
+                            f"  [yellow]This suggests a spec-level issue, not an "
+                            f"implementation bug.[/yellow]"
+                        )
+                        action = click.prompt(
+                            "  Choose [skip/continue/quit]",
+                            type=click.Choice(["skip", "continue", "quit"]),
+                            default="skip",
+                        )
+                        if action == "quit":
+                            console.print("  [red]Aborting by user request[/red]")
+                            return False
+                        if action == "skip":
+                            console.print(
+                                f"  [yellow]Skipping iteration {iteration} — "
+                                f"continuing to next story[/yellow]"
+                            )
+                            break
+                        # action == "continue" → keep going through remaining cycles
 
                 if not iteration_passed:
                     console.print(

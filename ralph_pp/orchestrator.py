@@ -20,6 +20,7 @@ from .steps.prd import (
     convert_prd_to_json,
     feature_to_slug,
     generate_prd,
+    review_prd_json_loop,
     review_prd_loop,
 )
 from .steps.sandbox import RunSummary, run_sandbox, validate_sandbox_prerequisites
@@ -181,7 +182,8 @@ class Orchestrator:
         dest.parent.mkdir(exist_ok=True)
         shutil.copy2(prd_file, dest)
         console.print(f"[green]✓ PRD copied:[/green] {prd_file} → {dest}")
-        convert_prd_to_json(dest, self.worktree_path, self.config)
+        prd_json = convert_prd_to_json(dest, self.worktree_path, self.config)
+        review_prd_json_loop(dest, prd_json, self.worktree_path, self.config)
 
     def _step_prd(self, skip_review: bool, *, manual_prd: bool = False) -> None:
         assert self.worktree_path is not None
@@ -192,7 +194,8 @@ class Orchestrator:
         run_hooks("post_prd_generate", self.config.hooks, self.worktree_path)
         if not skip_review:
             review_prd_loop(prd_file, self.worktree_path, self.config)
-        convert_prd_to_json(prd_file, self.worktree_path, self.config)
+        prd_json = convert_prd_to_json(prd_file, self.worktree_path, self.config)
+        review_prd_json_loop(prd_file, prd_json, self.worktree_path, self.config)
 
     def _step_sandbox(self) -> None:
         assert self.worktree_path is not None

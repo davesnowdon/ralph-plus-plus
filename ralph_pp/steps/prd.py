@@ -1,4 +1,4 @@
-"""PRD generation, review loop, and prd.json conversion."""
+"""PRD generation, review loop, prd.json conversion, and prd.json review."""
 
 from __future__ import annotations
 
@@ -164,6 +164,7 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
                 review_cfg.reviewer_prompt,
                 prd_file=str(prd_file),
                 previous_findings=context,
+                repo_path=str(worktree_path),
             )
             result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
             if not result.success:
@@ -270,3 +271,63 @@ def convert_prd_to_json(prd_file: Path, worktree_path: Path, config: Config) -> 
         raise RuntimeError(f"prd.json is not valid JSON: {e}") from e
     console.print(f"[green]✓ prd.json generated:[/green] {prd_json}")
     return prd_json
+
+
+def review_prd_json_loop(
+    prd_file: Path,
+    prd_json: Path,
+    worktree_path: Path,
+    config: Config,
+) -> None:
+    """Review generated prd.json against the original PRD and codebase.
+
+    Catches acceptance criteria that were sharpened, invented, or made
+    infeasible during the PRD-to-JSON conversion step.
+    """
+    review_cfg = config.prd_json_review
+    if not review_cfg.enabled:
+        console.print("[dim]prd.json review disabled — skipping[/dim]")
+        return
+
+    console.print("[bold cyan]\n── Step: prd.json Review ──[/bold cyan]")
+    reviewer = make_tool(review_cfg.reviewer, config)
+    fixer = make_tool(review_cfg.fixer, config)
+
+    for cycle in range(1, review_cfg.max_cycles + 1):
+        console.print(f"[bold]prd.json review cycle {cycle}/{review_cfg.max_cycles}[/bold]")
+
+        review_prompt = render_prompt(
+            review_cfg.reviewer_prompt,
+            prd_file=str(prd_file),
+            prd_json_file=str(prd_json),
+            repo_path=str(worktree_path),
+        )
+        result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
+        if not result.success:
+            raise RuntimeError(
+                f"prd.json reviewer failed (exit {result.exit_code}): "
+                f"{(result.output or result.stderr)[:200]}"
+            )
+
+        if result.is_lgtm:
+            console.print("[green]✓ prd.json review passed (LGTM)[/green]")
+            return
+
+        console.print("[yellow]Issues found in prd.json — running fix pass...[/yellow]")
+        fix_prompt = render_prompt(
+            review_cfg.fixer_prompt,
+            prd_json_file=str(prd_json),
+            prd_file=str(prd_file),
+            findings=result.output,
+        )
+        fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
+        if not fix_result.success:
+            raise RuntimeError(
+                f"prd.json fixer failed (exit {fix_result.exit_code}): "
+                f"{(fix_result.output or fix_result.stderr)[:200]}"
+            )
+
+    console.print(
+        f"[yellow]⚠ prd.json review: max cycles ({review_cfg.max_cycles}) "
+        f"reached without LGTM — continuing[/yellow]"
+    )
