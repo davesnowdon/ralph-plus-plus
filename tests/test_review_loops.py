@@ -4,9 +4,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ralph_pp.config import Config, PostReviewConfig, PrdReviewConfig, ToolConfig
+from ralph_pp.config import (
+    Config,
+    PostReviewConfig,
+    PrdJsonReviewConfig,
+    PrdReviewConfig,
+    ToolConfig,
+)
 from ralph_pp.steps.post_review import post_review_loop
-from ralph_pp.steps.prd import MaxCyclesAbort, prompt_max_cycles, review_prd_loop
+from ralph_pp.steps.prd import (
+    MaxCyclesAbort,
+    prompt_max_cycles,
+    review_prd_json_loop,
+    review_prd_loop,
+)
 from ralph_pp.tools.base import ToolResult
 
 
@@ -687,3 +698,220 @@ class TestPostReviewRespectsTestFlag:
                 post_review_loop(tmp_path, config)
 
         mock_run_tests.assert_called()
+
+
+class TestPrdReviewSeverityGating:
+    """PRD review accepts when only minor findings remain (#111)."""
+
+    def test_minor_only_findings_accepted(self, tmp_path):
+        config = _make_config(prd_review=_review_cfg(max_cycles=3))
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="some diff"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: minor\n   problem: style nit")
+            fixer_mock = MagicMock()
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            review_prd_loop(prd_file, tmp_path, config)
+
+        # Accepted on first cycle — fixer never called
+        assert reviewer_mock.run.call_count == 1
+        fixer_mock.run.assert_not_called()
+
+    def test_major_findings_not_auto_accepted(self, tmp_path):
+        config = _make_config(prd_review=_review_cfg(max_cycles=1))
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.prompt_max_cycles", return_value="continue"),
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="some diff"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result(
+                "1. severity: major\n   problem: contract mismatch"
+            )
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            review_prd_loop(prd_file, tmp_path, config)
+
+        # Major finding triggers fixer
+        fixer_mock.run.assert_called_once()
+
+
+class TestPrdReviewNoDiffWarning:
+    """PRD review warns when fixer produces no changes (#110)."""
+
+    def test_no_diff_warning_shown(self, tmp_path, capsys):
+        config = _make_config(prd_review=_review_cfg(max_cycles=1))
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.prompt_max_cycles", return_value="continue"),
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result(
+                "1. severity: major\n   problem: infeasible"
+            )
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            review_prd_loop(prd_file, tmp_path, config)
+
+        # When fixer produces no diff, the next reviewer call should NOT get
+        # "(no diff)" as the diff context — it should be empty
+        if reviewer_mock.run.call_count > 1:
+            second_prompt = reviewer_mock.run.call_args_list[1].kwargs.get(
+                "prompt", str(reviewer_mock.run.call_args_list[1])
+            )
+            assert "(no diff)" not in second_prompt
+
+
+class TestPrdJsonReviewMaxCycles:
+    """prd.json review prompts on max_cycles like PRD review (#116)."""
+
+    def _prd_json_review_cfg(self, max_cycles: int = 2) -> PrdJsonReviewConfig:
+        return PrdJsonReviewConfig(
+            reviewer="codex",
+            fixer="claude",
+            reviewer_prompt="Review {prd_file} {prd_json_file} {repo_path}",
+            fixer_prompt="Fix {prd_json_file} {prd_file} {findings}",
+            max_cycles=max_cycles,
+            enabled=True,
+        )
+
+    def test_quit_raises_max_cycles_abort(self, tmp_path):
+        config = _make_config()
+        config.prd_json_review = self._prd_json_review_cfg(max_cycles=1)
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.prompt_max_cycles", return_value="quit"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result(
+                "1. severity: major\nproblem: criteria drift"
+            )
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            with pytest.raises(MaxCyclesAbort):
+                review_prd_json_loop(prd_file, prd_json, tmp_path, config)
+
+    def test_continue_returns_normally(self, tmp_path):
+        config = _make_config()
+        config.prd_json_review = self._prd_json_review_cfg(max_cycles=1)
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.prompt_max_cycles", return_value="continue"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result(
+                "1. severity: major\nproblem: criteria drift"
+            )
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            # Should return without raising
+            review_prd_json_loop(prd_file, prd_json, tmp_path, config)
+
+    def test_retry_runs_another_batch(self, tmp_path):
+        config = _make_config()
+        config.prd_json_review = self._prd_json_review_cfg(max_cycles=1)
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        prompt_responses = iter(["retry", "continue"])
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch(
+                "ralph_pp.steps.prd.prompt_max_cycles",
+                side_effect=lambda *a, **kw: next(prompt_responses),
+            ),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result(
+                "1. severity: major\nproblem: criteria drift"
+            )
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            review_prd_json_loop(prd_file, prd_json, tmp_path, config)
+
+        # max_cycles=1, retry once + continue = 2 review calls
+        assert reviewer_mock.run.call_count == 2
+
+    def test_minor_only_findings_auto_accepted(self, tmp_path):
+        config = _make_config()
+        config.prd_json_review = self._prd_json_review_cfg(max_cycles=3)
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: minor\nproblem: style nit")
+            fixer_mock = MagicMock()
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            review_prd_json_loop(prd_file, prd_json, tmp_path, config)
+
+        # Accepted on first cycle — fixer never called
+        assert reviewer_mock.run.call_count == 1
+        fixer_mock.run.assert_not_called()

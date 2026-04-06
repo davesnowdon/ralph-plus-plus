@@ -11,6 +11,7 @@ from rich.console import Console
 
 from ..config import Config, PrdReviewConfig
 from ..tools import make_tool
+from ..tools.base import parse_max_severity, severity_at_or_above
 from ._git import get_diff, get_head_sha
 from ._prompts import render_prompt
 
@@ -184,6 +185,14 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
                 console.print("[green]✓ PRD review passed (LGTM)[/green]")
                 return
 
+            max_sev = parse_max_severity(result.output)
+            if max_sev and not severity_at_or_above(max_sev, "major"):
+                console.print(
+                    f"[green]✓ PRD review passed (only {max_sev} findings remain)[/green]"
+                )
+                console.print(f"[dim]{result.output}[/dim]")
+                return
+
             previous_findings = result.output
             console.print(
                 f"[yellow]Issues found in cycle {total_cycles} — running fix pass...[/yellow]"
@@ -201,6 +210,12 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
                     f"{(fix_result.output or fix_result.stderr)[:200]}"
                 )
             last_fixer_diff = get_diff(worktree_path, pre_fix_sha)
+            if not last_fixer_diff or last_fixer_diff.strip() == "(no diff)":
+                console.print(
+                    "[yellow]⚠ Fixer produced no changes — findings may be "
+                    "spec-level issues that cannot be fixed automatically[/yellow]"
+                )
+                last_fixer_diff = ""
 
         action = prompt_max_cycles("PRD", review_cfg.max_cycles)
         if action == "quit":
@@ -290,6 +305,9 @@ def review_prd_json_loop(
 
     Catches acceptance criteria that were sharpened, invented, or made
     infeasible during the PRD-to-JSON conversion step.
+
+    When *max_cycles* is exhausted without LGTM the user is prompted to choose:
+    quit, retry another batch of cycles, or continue anyway.
     """
     review_cfg = config.prd_json_review
     if not review_cfg.enabled:
@@ -300,41 +318,58 @@ def review_prd_json_loop(
     reviewer = make_tool(review_cfg.reviewer, config)
     fixer = make_tool(review_cfg.fixer, config)
 
-    for cycle in range(1, review_cfg.max_cycles + 1):
-        console.print(f"[bold]prd.json review cycle {cycle}/{review_cfg.max_cycles}[/bold]")
-
-        review_prompt = render_prompt(
-            review_cfg.reviewer_prompt,
-            prd_file=str(prd_file),
-            prd_json_file=str(prd_json),
-            repo_path=str(worktree_path),
-        )
-        result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
-        if not result.success:
-            raise RuntimeError(
-                f"prd.json reviewer failed (exit {result.exit_code}): "
-                f"{(result.output or result.stderr)[:200]}"
+    total_cycles = 0
+    while True:
+        for cycle in range(1, review_cfg.max_cycles + 1):
+            total_cycles += 1
+            console.print(
+                f"[bold]prd.json review cycle {total_cycles} "
+                f"({cycle}/{review_cfg.max_cycles} this batch)[/bold]"
             )
 
-        if result.is_lgtm:
-            console.print("[green]✓ prd.json review passed (LGTM)[/green]")
+            review_prompt = render_prompt(
+                review_cfg.reviewer_prompt,
+                prd_file=str(prd_file),
+                prd_json_file=str(prd_json),
+                repo_path=str(worktree_path),
+            )
+            result = reviewer.run(prompt=review_prompt, cwd=worktree_path)
+            if not result.success:
+                raise RuntimeError(
+                    f"prd.json reviewer failed (exit {result.exit_code}): "
+                    f"{(result.output or result.stderr)[:200]}"
+                )
+
+            if result.is_lgtm:
+                console.print("[green]✓ prd.json review passed (LGTM)[/green]")
+                return
+
+            max_sev = parse_max_severity(result.output)
+            if max_sev and not severity_at_or_above(max_sev, "major"):
+                console.print(
+                    f"[green]✓ prd.json review passed (only {max_sev} findings remain)[/green]"
+                )
+                console.print(f"[dim]{result.output}[/dim]")
+                return
+
+            console.print("[yellow]Issues found in prd.json — running fix pass...[/yellow]")
+            fix_prompt = render_prompt(
+                review_cfg.fixer_prompt,
+                prd_json_file=str(prd_json),
+                prd_file=str(prd_file),
+                findings=result.output,
+            )
+            fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
+            if not fix_result.success:
+                raise RuntimeError(
+                    f"prd.json fixer failed (exit {fix_result.exit_code}): "
+                    f"{(fix_result.output or fix_result.stderr)[:200]}"
+                )
+
+        action = prompt_max_cycles("prd.json", review_cfg.max_cycles)
+        if action == "quit":
+            raise MaxCyclesAbort
+        if action == "continue":
+            console.print("[yellow]Continuing without prd.json reviewer approval[/yellow]")
             return
-
-        console.print("[yellow]Issues found in prd.json — running fix pass...[/yellow]")
-        fix_prompt = render_prompt(
-            review_cfg.fixer_prompt,
-            prd_json_file=str(prd_json),
-            prd_file=str(prd_file),
-            findings=result.output,
-        )
-        fix_result = fixer.run(prompt=fix_prompt, cwd=worktree_path)
-        if not fix_result.success:
-            raise RuntimeError(
-                f"prd.json fixer failed (exit {fix_result.exit_code}): "
-                f"{(fix_result.output or fix_result.stderr)[:200]}"
-            )
-
-    console.print(
-        f"[yellow]⚠ prd.json review: max cycles ({review_cfg.max_cycles}) "
-        f"reached without LGTM — continuing[/yellow]"
-    )
+        console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")
