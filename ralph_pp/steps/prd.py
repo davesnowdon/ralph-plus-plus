@@ -65,6 +65,7 @@ def generate_prd(
     config: Config,
     *,
     manual: bool = False,
+    prd_prompt: str | None = None,
 ) -> Path:
     """
     Invoke the Claude /prd skill to generate a text PRD.
@@ -72,6 +73,10 @@ def generate_prd(
 
     When *manual* is True the feature description is not sent as a prompt,
     allowing the user to drive the conversation interactively.
+
+    When *prd_prompt* is provided it is used as the generation prompt instead
+    of the short *feature* string.  This allows a richer description while
+    keeping *feature* short for branch/worktree naming.
     """
     console.print("[bold cyan]\n── Step: Generate PRD ──[/bold cyan]")
     slug = feature_to_slug(feature)
@@ -79,11 +84,13 @@ def generate_prd(
     (worktree_path / "tasks").mkdir(exist_ok=True)
     tool = make_tool(config.prd_tool, config)
 
+    description = prd_prompt if prd_prompt else feature
+
     if manual:
         prompt = f"Save the PRD to tasks/{prd_filename} when done."
     else:
         prompt = (
-            f"Create a PRD for the following feature: {feature}\n\n"
+            f"Create a PRD for the following feature: {description}\n\n"
             "You have the /prd skill available. Use it to generate a detailed Product "
             "Requirements Document with goals, user stories, acceptance criteria, "
             "non-goals, and technical considerations.\n\n"
