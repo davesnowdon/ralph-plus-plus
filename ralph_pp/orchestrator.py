@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.rule import Rule
 
@@ -92,7 +93,7 @@ class Orchestrator:
                 self._step_post_review()
         except Exception as exc:
             failed = True
-            console.print("[bold red]\n✗ Workflow failed:[/bold red] " + str(exc))
+            console.print("[bold red]\n✗ Workflow failed:[/bold red] " + escape(str(exc)))
             raise
         finally:
             # Always attempt git config cleanup if we have a worktree
