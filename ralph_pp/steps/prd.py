@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.markup import escape
 
 from ..config import Config, PrdReviewConfig
 from ..tools import make_tool
@@ -190,7 +191,7 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
                 console.print(
                     f"[green]✓ PRD review passed (only {max_sev} findings remain)[/green]"
                 )
-                console.print(f"[dim]{result.output}[/dim]")
+                console.print(f"[dim]{escape(result.output or '')}[/dim]")
                 return
 
             previous_findings = result.output
@@ -349,7 +350,7 @@ def review_prd_json_loop(
                 console.print(
                     f"[green]✓ prd.json review passed (only {max_sev} findings remain)[/green]"
                 )
-                console.print(f"[dim]{result.output}[/dim]")
+                console.print(f"[dim]{escape(result.output or '')}[/dim]")
                 return
 
             console.print("[yellow]Issues found in prd.json — running fix pass...[/yellow]")
