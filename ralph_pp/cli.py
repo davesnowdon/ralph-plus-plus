@@ -180,6 +180,12 @@ _sandbox_dir_option = click.option(
     help="Path to an existing text PRD. Skips generation/review, proceeds to implementation.",
 )
 @click.option(
+    "--prd-prompt",
+    default=None,
+    help="Prompt text for PRD generation (can be longer/richer than --feature). "
+    "When provided, --feature is used only for naming branches and worktrees.",
+)
+@click.option(
     "--manual-prd",
     is_flag=True,
     default=False,
@@ -220,6 +226,7 @@ def run(
     sandbox_dir: Path | None,
     prd_only: bool,
     prd_file: Path | None,
+    prd_prompt: str | None,
     manual_prd: bool,
     resume_worktree: Path | None,
     story_filter: tuple[str, ...],
@@ -267,6 +274,7 @@ def run(
         skip_post_review=skip_post_review,
         prd_only=prd_only,
         prd_file=prd_file,
+        prd_prompt=prd_prompt,
         manual_prd=manual_prd,
     )
 

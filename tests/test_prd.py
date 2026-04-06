@@ -83,6 +83,76 @@ class TestGeneratePrd:
             with pytest.raises(RuntimeError, match="PRD generation failed"):
                 generate_prd("test feature", tmp_path, config)
 
+    def test_prd_prompt_used_when_provided(self, tmp_path):
+        """When prd_prompt is given, it should appear in the prompt instead of feature."""
+        config = _make_config()
+        prd_file = tmp_path / "tasks" / "prd-short-name.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        fake_result = ToolResult(output="Done", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            mock_tool = MagicMock()
+            mock_tool.run.return_value = fake_result
+            mock_make.return_value = mock_tool
+
+            generate_prd(
+                "short-name",
+                tmp_path,
+                config,
+                prd_prompt="Unify the dual memory systems behind a single canonical contract",
+            )
+
+            call_kwargs = mock_tool.run.call_args[1]
+            assert "Unify the dual memory systems" in call_kwargs["prompt"]
+            # The short feature name should NOT be in the prompt body
+            # (it's only used for the filename)
+            assert "Create a PRD for the following feature: short-name" not in call_kwargs["prompt"]
+
+    def test_feature_used_when_prd_prompt_absent(self, tmp_path):
+        """When prd_prompt is None, feature is used as the prompt."""
+        config = _make_config()
+        prd_file = tmp_path / "tasks" / "prd-my-feature.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        fake_result = ToolResult(output="Done", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            mock_tool = MagicMock()
+            mock_tool.run.return_value = fake_result
+            mock_make.return_value = mock_tool
+
+            generate_prd("my-feature", tmp_path, config)
+
+            call_kwargs = mock_tool.run.call_args[1]
+            assert "Create a PRD for the following feature: my-feature" in call_kwargs["prompt"]
+
+    def test_prd_prompt_does_not_affect_filename(self, tmp_path):
+        """Filename should be derived from feature, not prd_prompt."""
+        config = _make_config()
+        # The file that should be created uses the feature slug
+        prd_file = tmp_path / "tasks" / "prd-short-name.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        fake_result = ToolResult(output="Done", exit_code=0, success=True)
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            mock_tool = MagicMock()
+            mock_tool.run.return_value = fake_result
+            mock_make.return_value = mock_tool
+
+            result = generate_prd(
+                "short-name",
+                tmp_path,
+                config,
+                prd_prompt="A very long description that would make a terrible filename",
+            )
+
+            assert result.name == "prd-short-name.md"
+
 
 class TestConvertPrdToJson:
     def test_raises_when_json_missing_after_success(self, tmp_path):
