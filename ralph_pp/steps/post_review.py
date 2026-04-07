@@ -77,6 +77,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
     total_cycles = 0
     previous_findings: str = ""
     last_fixer_diff: str = ""
+    retry_used = False
     while True:
         for cycle in range(1, review_cfg.max_cycles + 1):
             total_cycles += 1
@@ -161,6 +162,9 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
             "Post-run",
             review_cfg.max_cycles,
             continue_label="Accept — finish without reviewer approval",
+            non_interactive=config.non_interactive,
+            policy=config.non_interactive.on_max_cycles_post,
+            retry_used=retry_used,
         )
         if action == "quit":
             raise MaxCyclesAbort
@@ -168,4 +172,5 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
             console.print("[yellow]Accepting implementation without reviewer approval[/yellow]")
             return PostReviewResult(outcome="accepted", cycles=total_cycles)
         # action == "retry" → loop again
+        retry_used = True
         console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")
