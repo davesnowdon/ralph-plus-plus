@@ -2183,6 +2183,8 @@ class TestPriorIterationFindings:
 
     def test_orchestrator_accumulates_findings_across_iterations(self, tmp_path):
         """Iteration 2's reviewer should see iteration 1's findings."""
+
+
 # ── Issue #114: circuit-breaker for consecutive infra failures ─────────
 
 
@@ -2572,10 +2574,6 @@ class TestReviewerPromptContent:
 
         assert "{prior_findings_summary}" in _ORCHESTRATED_REVIEW_PROMPT
         assert "{prior_findings_summary}" in _ORCHESTRATED_REVIEW_FIRST_PROMPT
-        state = json.loads(prd.read_text())
-        by_id = {s["id"]: s["passes"] for s in state["userStories"]}
-        assert by_id["US-001"] is True
-        assert by_id["US-002"] is False
 
 
 # ── Issue #127: skip-and-advance on retry exhaustion ───────────────────
