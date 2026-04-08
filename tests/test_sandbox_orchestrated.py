@@ -3250,3 +3250,59 @@ class TestFinalProgressOnComplete:
 
         captured = capsys.readouterr()
         assert "still have passes=false" in captured.out
+
+
+# ── Issue #82: log when reviewer_timeout is shadowed by tool timeout ───
+
+
+class TestReviewerTimeoutPrecedenceLogging:
+    def test_logs_debug_when_reviewer_timeout_shadowed(self, tmp_path, caplog):
+        """When tool timeout is set, orchestrated.reviewer_timeout is silently
+        ignored. #82 asks for a debug log so users can debug this surprise."""
+        import logging
+
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path)
+        # Tool already has its own timeout — should win
+        config.tools["codex"] = ToolConfig(command="codex", args=["{prompt}"], timeout=42)
+        config.orchestrated.reviewer_timeout = 999
+
+        with (
+            patch("ralph_pp.steps.sandbox.CliTool") as mock_tool_cls,
+            caplog.at_level(logging.DEBUG, logger="ralph_pp.steps.sandbox"),
+        ):
+            mock_tool = MagicMock()
+            mock_tool.run.return_value = ToolResult(success=True, output="LGTM", exit_code=0)
+            mock_tool_cls.return_value = mock_tool
+            _review_iteration(1, "diff", worktree, config)
+
+        # Verify the precedence log fired
+        assert any(
+            "reviewer_timeout=999 ignored" in r.message and "timeout=42" in r.message
+            for r in caplog.records
+        ), f"expected precedence debug log, got {[r.message for r in caplog.records]}"
+
+    def test_no_log_when_only_orchestrated_timeout_set(self, tmp_path, caplog):
+        """When only orchestrated.reviewer_timeout is set, it applies cleanly
+        and there should be no precedence-warning log."""
+        import logging
+
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path)
+        config.tools["codex"] = ToolConfig(command="codex", args=["{prompt}"], timeout=0)
+        config.orchestrated.reviewer_timeout = 999
+
+        with (
+            patch("ralph_pp.steps.sandbox.CliTool") as mock_tool_cls,
+            caplog.at_level(logging.DEBUG, logger="ralph_pp.steps.sandbox"),
+        ):
+            mock_tool = MagicMock()
+            mock_tool.run.return_value = ToolResult(success=True, output="LGTM", exit_code=0)
+            mock_tool_cls.return_value = mock_tool
+            _review_iteration(1, "diff", worktree, config)
+
+        assert not any("ignored" in r.message for r in caplog.records)
