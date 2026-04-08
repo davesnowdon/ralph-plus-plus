@@ -728,3 +728,117 @@ def test_provenance_format_output():
     cfg.branch_prefix = "test/"
     output = prov.format(cfg)
     assert "branch_prefix: 'test/'  (myfile.yaml)" in output
+
+
+def test_load_max_consecutive_infra_failures(tmp_path):
+    """orchestrated.max_consecutive_infra_failures is parsed from YAML."""
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"orchestrated": {"max_consecutive_infra_failures": 5}}))
+    cfg = load_config(config_file)
+    assert cfg.orchestrated.max_consecutive_infra_failures == 5
+
+
+def test_max_consecutive_infra_failures_default():
+    cfg = load_config(None)
+    assert cfg.orchestrated.max_consecutive_infra_failures == 3
+
+
+def test_max_consecutive_infra_failures_negative_rejected(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"orchestrated": {"max_consecutive_infra_failures": -1}}))
+    with pytest.raises(ValueError, match="max_consecutive_infra_failures"):
+        load_config(config_file)
+
+
+def test_load_non_interactive_defaults(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(
+        yaml.dump(
+            {
+                "non_interactive": {
+                    "enabled": True,
+                    "on_max_cycles_prd": "abort",
+                    "on_max_cycles_prd_json": "retry-once",
+                    "on_max_cycles_post": "continue",
+                }
+            }
+        )
+    )
+    cfg = load_config(config_file)
+    assert cfg.non_interactive.enabled is True
+    assert cfg.non_interactive.on_max_cycles_prd == "abort"
+    assert cfg.non_interactive.on_max_cycles_prd_json == "retry-once"
+    assert cfg.non_interactive.on_max_cycles_post == "continue"
+
+
+def test_non_interactive_defaults_when_absent():
+    cfg = load_config(None)
+    assert cfg.non_interactive.enabled is False
+    assert cfg.non_interactive.on_max_cycles_prd == "continue"
+    assert cfg.non_interactive.on_max_cycles_prd_json == "continue"
+    assert cfg.non_interactive.on_max_cycles_post == "continue"
+
+
+def test_non_interactive_invalid_policy_rejected(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"non_interactive": {"on_max_cycles_prd": "bogus"}}))
+    with pytest.raises(ValueError, match="on_max_cycles"):
+        load_config(config_file)
+
+
+def test_on_retry_exhaustion_default():
+    cfg = load_config(None)
+    assert cfg.orchestrated.on_retry_exhaustion == "skip-story"
+
+
+def test_on_retry_exhaustion_from_yaml(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"orchestrated": {"on_retry_exhaustion": "abort"}}))
+    cfg = load_config(config_file)
+    assert cfg.orchestrated.on_retry_exhaustion == "abort"
+
+
+def test_on_retry_exhaustion_invalid_rejected(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"orchestrated": {"on_retry_exhaustion": "bogus"}}))
+    with pytest.raises(ValueError, match="on_retry_exhaustion"):
+        load_config(config_file)
+
+
+def test_design_stance_defaults():
+    cfg = load_config(None)
+    assert cfg.design_stance.implementation_scope == "unspecified"
+    assert cfg.design_stance.backward_compatibility == "unspecified"
+    assert cfg.design_stance.existing_tests == "unspecified"
+    assert cfg.design_stance.api_stability == "unspecified"
+    assert cfg.design_stance.notes == ""
+
+
+def test_design_stance_from_yaml(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(
+        yaml.dump(
+            {
+                "design_stance": {
+                    "implementation_scope": "single_pass",
+                    "backward_compatibility": "required",
+                    "existing_tests": "must_pass",
+                    "api_stability": "extend_only",
+                    "notes": "no rocket science",
+                }
+            }
+        )
+    )
+    cfg = load_config(config_file)
+    assert cfg.design_stance.implementation_scope == "single_pass"
+    assert cfg.design_stance.backward_compatibility == "required"
+    assert cfg.design_stance.existing_tests == "must_pass"
+    assert cfg.design_stance.api_stability == "extend_only"
+    assert cfg.design_stance.notes == "no rocket science"
+
+
+def test_design_stance_invalid_value_rejected(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"design_stance": {"implementation_scope": "bogus"}}))
+    with pytest.raises(ValueError, match="implementation_scope"):
+        load_config(config_file)

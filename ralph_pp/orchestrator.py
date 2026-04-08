@@ -129,6 +129,20 @@ class Orchestrator:
         wt = self.resume_worktree.resolve()
         if not wt.is_dir():
             raise FileNotFoundError(f"Worktree directory not found: {wt}")
+        # #84: a primary working tree has `.git` as a directory; a linked
+        # worktree has `.git` as a file containing `gitdir: ...`. We only
+        # want to operate on linked worktrees so cleanup, etc. cannot
+        # accidentally damage a primary working tree.
+        git_marker = wt / ".git"
+        if not git_marker.exists():
+            raise ValueError(f"Resume target is not a git directory (no .git found): {wt}")
+        if not git_marker.is_file():
+            raise ValueError(
+                f"Resume target is not a linked git worktree: {wt}\n"
+                f"  --resume-worktree expects a path created by `git worktree add`. "
+                f"Pointing it at a primary working tree is unsafe (cleanup could "
+                f"damage your main checkout)."
+            )
         prd_json = wt / "scripts" / "ralph" / "prd.json"
         if not prd_json.exists():
             raise FileNotFoundError(f"prd.json not found in worktree: {prd_json}")
@@ -167,7 +181,12 @@ class Orchestrator:
         ensure_prd_skills(self.config, base)
         run_hooks("pre_prd_generate", self.config.hooks, base)
         prd_file = generate_prd(
-            self.feature, base, self.config, manual=manual_prd, prd_prompt=prd_prompt
+            self.feature,
+            base,
+            self.config,
+            manual=manual_prd,
+            prd_prompt=prd_prompt,
+            repo_path=self.config.repo_path,
         )
         run_hooks("post_prd_generate", self.config.hooks, base)
         if not skip_review:
@@ -207,7 +226,12 @@ class Orchestrator:
         ensure_prd_skills(self.config, self.worktree_path)
         run_hooks("pre_prd_generate", self.config.hooks, self.worktree_path)
         prd_file = generate_prd(
-            self.feature, self.worktree_path, self.config, manual=manual_prd, prd_prompt=prd_prompt
+            self.feature,
+            self.worktree_path,
+            self.config,
+            manual=manual_prd,
+            prd_prompt=prd_prompt,
+            repo_path=self.config.repo_path,
         )
         run_hooks("post_prd_generate", self.config.hooks, self.worktree_path)
         if not skip_review:

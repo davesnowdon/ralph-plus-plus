@@ -359,3 +359,191 @@ class TestReviewPrdJsonLoop:
 
             call_kwargs = mock_reviewer.run.call_args[1]
             assert str(tmp_path) in call_kwargs["prompt"]
+
+
+# ── Issue #117: codebase context appended to PRD generation prompt ─────
+
+
+class TestCodebaseContextInPrdGeneration:
+    def test_repo_path_appended_to_prompt(self, tmp_path):
+        from ralph_pp.steps.prd import generate_prd as gen
+
+        config = _make_config()
+        captured = {}
+
+        def fake_run(prompt, cwd):
+            captured["prompt"] = prompt
+            (tmp_path / "tasks").mkdir(exist_ok=True)
+            (tmp_path / "tasks" / "prd-test-feat.md").write_text("# PRD")
+            return ToolResult(success=True, output="ok", exit_code=0)
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = fake_run
+            mock_make.return_value = mock_tool
+
+            gen(
+                "test feat",
+                tmp_path,
+                config,
+                prd_prompt="some description",
+                repo_path=tmp_path / "fake-repo",
+            )
+
+        prompt = captured["prompt"]
+        assert "Read the existing codebase first" in prompt
+        assert str(tmp_path / "fake-repo") in prompt
+
+    def test_manual_mode_does_not_append_codebase_block(self, tmp_path):
+        from ralph_pp.steps.prd import generate_prd as gen
+
+        config = _make_config()
+        captured = {}
+
+        def fake_run(prompt, cwd):
+            captured["prompt"] = prompt
+            (tmp_path / "tasks").mkdir(exist_ok=True)
+            (tmp_path / "tasks" / "prd-test-feat.md").write_text("# PRD")
+            return ToolResult(success=True, output="ok", exit_code=0)
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = fake_run
+            mock_make.return_value = mock_tool
+
+            gen("test feat", tmp_path, config, manual=True, repo_path=tmp_path / "fake-repo")
+
+        # Manual mode uses a minimal prompt that does not include the
+        # codebase context block.
+        assert "Read the existing codebase first" not in captured["prompt"]
+
+
+# ── Issue #121: design-stance constraints injected into prompt ─────────
+
+
+class TestDesignStanceInPrdGeneration:
+    def test_design_stance_constraints_appended(self, tmp_path):
+        from ralph_pp.config import DesignStanceConfig
+        from ralph_pp.steps.prd import generate_prd as gen
+
+        config = _make_config()
+        config.design_stance = DesignStanceConfig(
+            implementation_scope="single_pass",
+            backward_compatibility="required",
+            existing_tests="must_pass",
+            api_stability="extend_only",
+            notes="prefer pure-python solutions",
+        )
+        captured = {}
+
+        def fake_run(prompt, cwd):
+            captured["prompt"] = prompt
+            (tmp_path / "tasks").mkdir(exist_ok=True)
+            (tmp_path / "tasks" / "prd-test-feat.md").write_text("# PRD")
+            return ToolResult(success=True, output="ok", exit_code=0)
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = fake_run
+            mock_make.return_value = mock_tool
+
+            gen("test feat", tmp_path, config, prd_prompt="desc", repo_path=tmp_path)
+
+        prompt = captured["prompt"]
+        assert "Design constraints" in prompt
+        assert "SINGLE implementation pass" in prompt
+        assert "Backward compatibility is REQUIRED" in prompt
+        assert "ALL existing tests must continue to pass" in prompt
+        assert "may only EXTEND with optional parameters" in prompt
+        assert "prefer pure-python solutions" in prompt
+
+    def test_design_stance_unspecified_omits_block(self, tmp_path):
+        from ralph_pp.steps.prd import generate_prd as gen
+
+        config = _make_config()  # Default DesignStanceConfig: all unspecified
+        captured = {}
+
+        def fake_run(prompt, cwd):
+            captured["prompt"] = prompt
+            (tmp_path / "tasks").mkdir(exist_ok=True)
+            (tmp_path / "tasks" / "prd-test-feat.md").write_text("# PRD")
+            return ToolResult(success=True, output="ok", exit_code=0)
+
+        with patch("ralph_pp.steps.prd.make_tool") as mock_make:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = fake_run
+            mock_make.return_value = mock_tool
+
+            gen("test feat", tmp_path, config, prd_prompt="desc", repo_path=tmp_path)
+
+        assert "Design constraints" not in captured["prompt"]
+
+    def test_build_design_stance_block_partial(self):
+        from ralph_pp.config import DesignStanceConfig
+        from ralph_pp.steps.prd import _build_design_stance_block
+
+        # Only one field set
+        stance = DesignStanceConfig(implementation_scope="incremental")
+        block = _build_design_stance_block(stance)
+        assert "incrementally" in block
+        assert "Backward compatibility" not in block
+
+    def test_build_design_stance_block_empty(self):
+        from ralph_pp.config import DesignStanceConfig
+        from ralph_pp.steps.prd import _build_design_stance_block
+
+        assert _build_design_stance_block(None) == ""
+        assert _build_design_stance_block(DesignStanceConfig()) == ""
+
+
+# ── Issue #118: PRD review diminishing-returns detection ───────────────
+
+
+class TestPrdReviewConvergence:
+    def test_findings_jaccard_basic(self):
+        from ralph_pp.steps.prd import findings_jaccard
+
+        assert findings_jaccard("alpha beta gamma", "alpha beta gamma") == 1.0
+        assert findings_jaccard("alpha beta", "delta epsilon") == 0.0
+        assert findings_jaccard("", "anything") == 0.0
+        # Partial overlap
+        result = findings_jaccard("alpha beta gamma", "alpha beta delta")
+        assert 0 < result < 1
+
+    def test_review_loop_accepts_on_convergence(self, tmp_path):
+        """Two consecutive cycles producing similar findings should auto-accept."""
+        from ralph_pp.config import PrdReviewConfig
+        from ralph_pp.steps.prd import review_prd_loop
+
+        config = _make_config()
+        config.prd_review = PrdReviewConfig(
+            reviewer="codex",
+            fixer="claude",
+            max_cycles=4,
+        )
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        # Same findings text on cycles 1 and 2 → 100% Jaccard → accept
+        same_findings = "1. severity: major\nproblem: ambiguous validation requirement at boundary"
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = ToolResult(
+                success=True, output=same_findings, exit_code=0
+            )
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = ToolResult(success=True, output="fixed", exit_code=0)
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            review_prd_loop(prd_file, tmp_path, config)
+
+        # Should converge after cycle 2 — only 2 review calls
+        assert reviewer_mock.run.call_count == 2
