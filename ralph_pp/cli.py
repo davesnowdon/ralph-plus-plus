@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import fnmatch
+import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -330,8 +333,18 @@ def worktrees() -> None:
     """Manage ralph++ git worktrees."""
 
 
-def _find_ralph_worktrees(repo_path: Path) -> list[tuple[str, str]]:
-    """Return ``[(path, branch), ...]`` for all ralph++ worktrees in *repo_path*."""
+@dataclass
+class WorktreeInfo:
+    """Metadata about a ralph++ git worktree (#95, #99)."""
+
+    path: str
+    branch: str
+    dirty: bool  # True when git status --porcelain shows uncommitted changes
+    last_commit_age_seconds: int | None  # None when the worktree dir is missing
+
+
+def _find_ralph_worktrees(repo_path: Path) -> list[WorktreeInfo]:
+    """Return :class:`WorktreeInfo` for all ralph++ worktrees in *repo_path*."""
     try:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
@@ -346,7 +359,7 @@ def _find_ralph_worktrees(repo_path: Path) -> list[tuple[str, str]]:
             f"  {exc.stderr.strip() if exc.stderr else exc}"
         ) from exc
 
-    entries: list[tuple[str, str]] = []
+    raw_pairs: list[tuple[str, str]] = []
     current_path = ""
     current_branch = ""
     for line in result.stdout.splitlines():
@@ -356,50 +369,227 @@ def _find_ralph_worktrees(repo_path: Path) -> list[tuple[str, str]]:
             current_branch = line.split(" ", 1)[1].removeprefix("refs/heads/")
         elif line == "":
             if current_branch.startswith("ralph/"):
-                entries.append((current_path, current_branch))
+                raw_pairs.append((current_path, current_branch))
             current_path = ""
             current_branch = ""
-    # Handle last entry (porcelain output may not end with a blank line)
     if current_branch.startswith("ralph/"):
-        entries.append((current_path, current_branch))
-    return entries
+        raw_pairs.append((current_path, current_branch))
+
+    return [_inspect_worktree(path, branch) for path, branch in raw_pairs]
+
+
+def _inspect_worktree(path: str, branch: str) -> WorktreeInfo:
+    """Probe a worktree directory for dirty state and last-commit age."""
+    wt_path = Path(path)
+    dirty = False
+    age_seconds: int | None = None
+    if wt_path.is_dir():
+        try:
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=wt_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            dirty = bool(status.stdout.strip())
+        except (subprocess.SubprocessError, OSError):
+            dirty = False
+        try:
+            age = subprocess.run(
+                ["git", "log", "-1", "--format=%ct"],
+                cwd=wt_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if age.returncode == 0 and age.stdout.strip():
+                import time as _time
+
+                committer_ts = int(age.stdout.strip())
+                age_seconds = max(0, int(_time.time()) - committer_ts)
+        except (subprocess.SubprocessError, OSError, ValueError):
+            age_seconds = None
+    return WorktreeInfo(path=path, branch=branch, dirty=dirty, last_commit_age_seconds=age_seconds)
+
+
+_DURATION_RE = re.compile(r"^(\d+)\s*([smhdw])$", re.IGNORECASE)
+_DURATION_UNITS = {
+    "s": 1,
+    "m": 60,
+    "h": 3600,
+    "d": 86400,
+    "w": 86400 * 7,
+}
+
+
+def _parse_duration(value: str) -> int:
+    """Parse a duration like '7d', '24h', '30m', '90s' to seconds.
+
+    Raises ``click.BadParameter`` on invalid input. Used by
+    ``worktrees clean --older-than`` (#100).
+    """
+    if not value:
+        raise click.BadParameter("duration must not be empty")
+    match = _DURATION_RE.match(value.strip())
+    if not match:
+        raise click.BadParameter(
+            f"invalid duration {value!r}; expected forms like '7d', '24h', '30m', '90s'"
+        )
+    n, unit = match.groups()
+    return int(n) * _DURATION_UNITS[unit.lower()]
+
+
+def _format_age(seconds: int | None) -> str:
+    """Render an age in seconds as a compact 'Xd ago' / 'Xh ago' string."""
+    if seconds is None:
+        return "?"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    if seconds < 86400 * 14:
+        return f"{seconds // 86400}d ago"
+    return f"{seconds // (86400 * 7)}w ago"
 
 
 @worktrees.command(name="list")
 @_repo_option
 def worktrees_list(repo: Path | None) -> None:
-    """List all ralph++ worktrees for this repo."""
+    """List all ralph++ worktrees for this repo with dirty status and age."""
     entries = _find_ralph_worktrees((repo or Path.cwd()).resolve())
 
     if not entries:
         console.print("[dim]No ralph++ worktrees found.[/dim]")
         return
 
-    for path, branch in entries:
-        console.print(f"  {escape(branch)}  →  {escape(path)}")
+    for info in entries:
+        # Escape the literal brackets so Rich renders "[dirty]" as text,
+        # not as an unknown markup tag.
+        dirty_marker = "  [yellow]\\[dirty][/yellow]" if info.dirty else ""
+        age_str = _format_age(info.last_commit_age_seconds)
+        console.print(f"  {escape(info.branch)}  →  {escape(info.path)}  ({age_str}){dirty_marker}")
     console.print(f"\n[dim]{len(entries)} worktree(s)[/dim]")
+
+
+def _filter_worktrees_for_clean(
+    entries: list[WorktreeInfo],
+    *,
+    older_than: int | None,
+    branch_pattern: str | None,
+) -> list[WorktreeInfo]:
+    """Apply ``--older-than`` and ``--branch`` filters (#100)."""
+    result: list[WorktreeInfo] = []
+    for info in entries:
+        if branch_pattern and not fnmatch.fnmatch(info.branch, branch_pattern):
+            continue
+        if older_than is not None:
+            if info.last_commit_age_seconds is None:
+                # Unknown age — skip rather than risk removing fresh work.
+                continue
+            if info.last_commit_age_seconds < older_than:
+                continue
+        result.append(info)
+    return result
 
 
 @worktrees.command(name="clean")
 @_repo_option
 @click.option("--force", is_flag=True, default=False, help="Force removal even if dirty.")
-@click.confirmation_option(prompt="Remove all ralph++ worktrees?")
-def worktrees_clean(repo: Path | None, force: bool) -> None:
-    """Remove all ralph++ worktrees and their branches."""
-    repo_path = (repo or Path.cwd()).resolve()
-    entries = _find_ralph_worktrees(repo_path)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print what would be removed/skipped without making changes (#98).",
+)
+@click.option(
+    "--older-than",
+    "older_than_str",
+    default=None,
+    help="Only remove worktrees whose last commit is older than this duration "
+    "(e.g. '7d', '24h', '30m', '90s'). #100",
+)
+@click.option(
+    "--branch",
+    "branch_pattern",
+    default=None,
+    help="Only remove worktrees whose branch matches this fnmatch glob "
+    "(e.g. 'ralph/implement-*'). #100",
+)
+@click.option(
+    "--keep-branches",
+    is_flag=True,
+    default=False,
+    help="Do not delete the underlying ralph/* branches after removing the "
+    "worktrees. By default branches are deleted. #97",
+)
+@click.option(
+    "--yes",
+    "skip_confirmation",
+    is_flag=True,
+    default=False,
+    help="Skip the interactive confirmation prompt. Required for --dry-run "
+    "and selective filters in unattended runs.",
+)
+def worktrees_clean(
+    repo: Path | None,
+    force: bool,
+    dry_run: bool,
+    older_than_str: str | None,
+    branch_pattern: str | None,
+    keep_branches: bool,
+    skip_confirmation: bool,
+) -> None:
+    """Remove ralph++ worktrees (and by default their branches).
 
+    With no filters this removes all ralph++ worktrees, matching the
+    legacy behavior. Use --older-than, --branch, and --dry-run to scope
+    or preview the operation. (#95, #97, #98, #99, #100)
+    """
+    repo_path = (repo or Path.cwd()).resolve()
+    older_than = _parse_duration(older_than_str) if older_than_str else None
+
+    entries = _find_ralph_worktrees(repo_path)
     if not entries:
         console.print("[dim]No ralph++ worktrees to clean.[/dim]")
         return
 
+    candidates = _filter_worktrees_for_clean(
+        entries, older_than=older_than, branch_pattern=branch_pattern
+    )
+    if not candidates:
+        console.print("[dim]No ralph++ worktrees match the given filters.[/dim]")
+        return
+
+    # Confirmation: bypass for --dry-run, --yes, or when filters are in use
+    # (the user has already narrowed scope explicitly).
+    if not dry_run and not skip_confirmation:
+        if not click.confirm(f"Remove {len(candidates)} ralph++ worktree(s)?", default=False):
+            console.print("[dim]Aborted.[/dim]")
+            return
+
     removed = 0
+    skipped = 0
     failed = 0
-    for path, branch in entries:
-        console.print(f"[yellow]Removing:[/yellow] {escape(path)} ({escape(branch)})")
+    for info in candidates:
+        if info.dirty and not force:
+            console.print(
+                f"[yellow]Skip (dirty):[/yellow] {escape(info.path)} ({escape(info.branch)})"
+            )
+            skipped += 1
+            continue
+
+        if dry_run:
+            console.print(f"[cyan]Would remove:[/cyan] {escape(info.path)} ({escape(info.branch)})")
+            removed += 1
+            continue
+
+        console.print(f"[yellow]Removing:[/yellow] {escape(info.path)} ({escape(info.branch)})")
         force_flag = ["--force"] if force else []
         wt_result = subprocess.run(
-            ["git", "worktree", "remove", *force_flag, path],
+            ["git", "worktree", "remove", *force_flag, info.path],
             cwd=repo_path,
             check=False,
             capture_output=True,
@@ -411,16 +601,29 @@ def worktrees_clean(repo: Path | None, force: bool) -> None:
             # Git stderr can contain bracketed text — escape it for Rich (#125).
             console.print(f"[red]  ✗ Failed to remove worktree: {escape(msg)}[/red]")
             continue
-        subprocess.run(
-            ["git", "branch", "-D", branch],
-            cwd=repo_path,
-            check=False,
-            capture_output=True,
-        )
+        if not keep_branches:
+            subprocess.run(
+                ["git", "branch", "-D", info.branch],
+                cwd=repo_path,
+                check=False,
+                capture_output=True,
+            )
         removed += 1
 
-    if removed:
-        console.print(f"[green]✓ Removed {removed} worktree(s)[/green]")
+    if dry_run:
+        console.print(
+            f"\n[cyan]Dry run:[/cyan] would remove {removed}, "
+            f"skip {skipped} (use --force to include dirty worktrees)"
+        )
+    else:
+        if removed:
+            verb = "Removed"
+            console.print(f"[green]✓ {verb} {removed} worktree(s)[/green]")
+        if skipped:
+            console.print(
+                f"[yellow]Skipped {skipped} dirty worktree(s) "
+                "(use --force to include them)[/yellow]"
+            )
     if failed:
         console.print(f"[red]✗ Failed to remove {failed} worktree(s)[/red]")
         raise SystemExit(1)
