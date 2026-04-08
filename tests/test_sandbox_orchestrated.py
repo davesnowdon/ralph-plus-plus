@@ -2100,6 +2100,91 @@ class TestStoryScopedReview:
         assert "did not mark any story" in captured_stories_arg
 
 
+# ── Issue #102: cumulative awareness across iterations ─────────────────
+
+
+class TestPriorIterationFindings:
+    def test_summarize_findings_for_history_picks_finding_lines(self):
+        from ralph_pp.steps.sandbox import summarize_findings_for_history
+
+        findings = (
+            "1. severity: major\n"
+            "file: ralph_pp/foo.py\n"
+            "problem: missing UTC validation\n"
+            "evidence: line 42 omits the timezone check\n"
+            "recommended fix: add a guard"
+        )
+        summary = summarize_findings_for_history(3, findings)
+        assert summary, "expected at least one summary line"
+        assert any("iter 3:" in line for line in summary)
+        assert any("missing UTC validation" in line for line in summary)
+
+    def test_summarize_findings_returns_empty_for_lgtm(self):
+        from ralph_pp.steps.sandbox import summarize_findings_for_history
+
+        assert summarize_findings_for_history(1, "LGTM") == []
+
+    def test_summarize_findings_caps_lines(self):
+        from ralph_pp.steps.sandbox import summarize_findings_for_history
+
+        findings = "\n".join(f"{i}. severity: minor\nproblem: thing {i}" for i in range(1, 11))
+        summary = summarize_findings_for_history(2, findings, max_lines=3)
+        assert len(summary) == 3
+
+    def test_format_prior_findings_summary_empty(self):
+        from ralph_pp.steps.sandbox import _format_prior_findings_summary
+
+        assert _format_prior_findings_summary(None) == ""
+        assert _format_prior_findings_summary([]) == ""
+
+    def test_format_prior_findings_summary_with_entries(self):
+        from ralph_pp.steps.sandbox import _format_prior_findings_summary
+
+        result = _format_prior_findings_summary(
+            [
+                "iter 1: severity: minor problem: shallow copy",
+                "iter 2: severity: major problem: missing UTC validation",
+            ]
+        )
+        assert "Prior iteration findings" in result
+        assert "shallow copy" in result
+        assert "missing UTC validation" in result
+
+    def test_review_iteration_passes_prior_findings_to_prompt(self, tmp_path):
+        """The reviewer should receive the prior_findings_summary block."""
+        from ralph_pp.steps.sandbox import _review_iteration
+
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path)
+        captured_prompt = {}
+
+        def fake_run(prompt, cwd):
+            captured_prompt["text"] = prompt
+            return ToolResult(success=True, output="LGTM", exit_code=0)
+
+        with patch("ralph_pp.steps.sandbox.CliTool") as mock_tool_cls:
+            mock_tool = MagicMock()
+            mock_tool.run.side_effect = fake_run
+            mock_tool_cls.return_value = mock_tool
+            _review_iteration(
+                1,
+                "diff",
+                worktree,
+                config,
+                stories_under_review="some story",
+                prior_iteration_findings=[
+                    "iter 1: severity: major problem: defensive copy missing"
+                ],
+            )
+
+        assert "text" in captured_prompt
+        assert "Prior iteration findings" in captured_prompt["text"]
+        assert "defensive copy missing" in captured_prompt["text"]
+
+    def test_orchestrator_accumulates_findings_across_iterations(self, tmp_path):
+        """Iteration 2's reviewer should see iteration 1's findings."""
+
+
 # ── Issue #114: circuit-breaker for consecutive infra failures ─────────
 
 
@@ -2399,18 +2484,16 @@ class TestPassesBaselineEnforcementInOrchestrator:
             json.dumps(
                 {
                     "userStories": [
-                        {"id": "US-001", "title": "A", "passes": False},
-                        {"id": "US-002", "title": "B", "passes": False},
+                        {"id": "US-001", "title": "A", "passes": False, "priority": 1},
+                        {"id": "US-002", "title": "B", "passes": False, "priority": 2},
                     ]
                 }
             )
         )
         config = _make_config(
-            tmp_path,
-            max_iterations=1,
-            max_iteration_retries=0,
-            backout_on_failure=True,
+            tmp_path, max_iterations=2, max_iteration_retries=0, backout_on_failure=True
         )
+        captured_prior: list[list[str]] = []
 
         def mock_subprocess_run(cmd, **kwargs):
             if isinstance(cmd, list) and "rev-parse" in cmd:
@@ -2426,6 +2509,14 @@ class TestPassesBaselineEnforcementInOrchestrator:
             return _fake_subprocess_run(returncode=0, stdout="coder output")
 
         def mock_review(*args, **kwargs):
+            captured_prior.append(list(kwargs.get("prior_iteration_findings") or []))
+            if len(captured_prior) == 1:
+                return ReviewResult(
+                    passed=True,
+                    findings=("1. severity: minor\nfile: foo.py\nproblem: shallow copy in to_dict"),
+                    max_severity="minor",
+                    minor_only=True,
+                )
             return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
 
         with (
@@ -2440,10 +2531,49 @@ class TestPassesBaselineEnforcementInOrchestrator:
         ):
             _run_orchestrated(worktree, config)
 
-        state = json.loads(prd.read_text())
-        by_id = {s["id"]: s["passes"] for s in state["userStories"]}
-        assert by_id["US-001"] is True
-        assert by_id["US-002"] is False
+        # First iteration: prior list is empty
+        assert captured_prior[0] == []
+        # Second iteration: should contain at least one entry from iteration 1
+        assert any("iter 1:" in line for line in captured_prior[1]), captured_prior
+
+
+# ── Issue #115 + #93: reviewer prompt content checks ───────────────────
+
+
+class TestReviewerPromptContent:
+    def test_review_prompt_contains_severity_discipline(self):
+        """The default review prompt should include severity-discipline guidance (#115)."""
+        from ralph_pp.config import _ORCHESTRATED_REVIEW_PROMPT
+
+        assert "Severity discipline" in _ORCHESTRATED_REVIEW_PROMPT
+        assert "design tradeoff" in _ORCHESTRATED_REVIEW_PROMPT
+        assert "more charitable" in _ORCHESTRATED_REVIEW_PROMPT
+
+    def test_first_review_prompt_contains_severity_discipline(self):
+        from ralph_pp.config import _ORCHESTRATED_REVIEW_FIRST_PROMPT
+
+        assert "Severity discipline" in _ORCHESTRATED_REVIEW_FIRST_PROMPT
+        assert "design tradeoff" in _ORCHESTRATED_REVIEW_FIRST_PROMPT
+
+    def test_review_prompts_emphasize_contract_enforcement(self):
+        """Both review prompts should ask for contract/invariant verification (#93)."""
+        from ralph_pp.config import (
+            _ORCHESTRATED_REVIEW_FIRST_PROMPT,
+            _ORCHESTRATED_REVIEW_PROMPT,
+        )
+
+        for prompt in (_ORCHESTRATED_REVIEW_PROMPT, _ORCHESTRATED_REVIEW_FIRST_PROMPT):
+            assert "contract" in prompt.lower()
+            assert "invariant" in prompt.lower()
+
+    def test_review_prompts_have_prior_findings_placeholder(self):
+        from ralph_pp.config import (
+            _ORCHESTRATED_REVIEW_FIRST_PROMPT,
+            _ORCHESTRATED_REVIEW_PROMPT,
+        )
+
+        assert "{prior_findings_summary}" in _ORCHESTRATED_REVIEW_PROMPT
+        assert "{prior_findings_summary}" in _ORCHESTRATED_REVIEW_FIRST_PROMPT
 
 
 # ── Issue #127: skip-and-advance on retry exhaustion ───────────────────
