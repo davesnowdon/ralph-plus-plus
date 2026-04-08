@@ -104,6 +104,10 @@ orchestrated:
   backout_on_failure: true
   max_consecutive_infra_failures: 3 # [project] abort after N coder infra failures in a row
                                     #           (OAuth expiry, network, timeout). 0 disables.
+  on_retry_exhaustion: skip-story   # [project] skip-story | abort
+                                    # When an iteration exhausts retries, skip the
+                                    # failing story and continue instead of aborting
+                                    # the whole backlog.
 
   review_prompt: >
     Review the following git diff against the requirements in {prd_file}.

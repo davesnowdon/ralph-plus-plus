@@ -425,6 +425,19 @@ class NonInteractiveConfig:
     on_max_cycles_post: OnMaxCycles = "continue"
 
 
+OnRetryExhaustion = Literal["abort", "skip-story"]
+_VALID_ON_RETRY_EXHAUSTION: set[str] = {"abort", "skip-story"}
+
+
+def parse_on_retry_exhaustion(value: str) -> OnRetryExhaustion:
+    """Validate and narrow a string to an ``OnRetryExhaustion`` literal."""
+    if value not in _VALID_ON_RETRY_EXHAUSTION:
+        raise ValueError(
+            f"Invalid on_retry_exhaustion: {value!r} (expected one of {_VALID_ON_RETRY_EXHAUSTION})"
+        )
+    return cast(OnRetryExhaustion, value)
+
+
 @dataclass
 class OrchestratedConfig:
     coder: str = "claude"
@@ -441,6 +454,12 @@ class OrchestratedConfig:
     # with an infra/process error (OAuth expiry, network, timeout). Counter
     # resets on any successful coder run. 0 disables the circuit-breaker.
     max_consecutive_infra_failures: int = 3
+    # Behavior when an iteration exhausts all retries / fix cycles for a
+    # single story (#127):
+    #   "abort"      — stop the backlog and advance to post-review (legacy)
+    #   "skip-story" — mark the failing story as skipped, continue the loop
+    #                  so independent downstream stories still get a chance
+    on_retry_exhaustion: OnRetryExhaustion = "skip-story"
     coder_timeout: int = 1800  # seconds (30 min default)
     reviewer_timeout: int = 300  # seconds (5 min default)
     fixer_timeout: int = 600  # seconds (10 min default)
@@ -769,6 +788,9 @@ def _build_config(data: dict[str, Any]) -> Config:
                     defaults.max_consecutive_infra_failures,
                 )
             ),
+            on_retry_exhaustion=parse_on_retry_exhaustion(
+                o.get("on_retry_exhaustion", defaults.on_retry_exhaustion)
+            ),
             coder_timeout=int(o.get("coder_timeout", defaults.coder_timeout)),
             reviewer_timeout=int(o.get("reviewer_timeout", defaults.reviewer_timeout)),
             fixer_timeout=int(o.get("fixer_timeout", defaults.fixer_timeout)),
@@ -876,6 +898,12 @@ def validate_config(cfg: Config) -> None:
         errors.append(
             "orchestrated.max_consecutive_infra_failures must be >= 0, "
             f"got {cfg.orchestrated.max_consecutive_infra_failures}"
+        )
+
+    if cfg.orchestrated.on_retry_exhaustion not in _VALID_ON_RETRY_EXHAUSTION:
+        errors.append(
+            f"orchestrated.on_retry_exhaustion="
+            f"{cfg.orchestrated.on_retry_exhaustion!r} not in {_VALID_ON_RETRY_EXHAUSTION}"
         )
 
     for attr in (
