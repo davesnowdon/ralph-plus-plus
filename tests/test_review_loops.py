@@ -167,13 +167,18 @@ class TestPrdReviewLoopMaxCycles:
             patch("ralph_pp.steps.prd.make_tool") as mock_make,
             patch(
                 "ralph_pp.steps.prd.prompt_max_cycles",
-                side_effect=lambda *a: next(prompt_responses),
+                side_effect=lambda *a, **kw: next(prompt_responses),
             ),
             patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
             patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
         ):
             reviewer_mock = MagicMock()
-            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            # Different findings each cycle so the #118 convergence detector
+            # doesn't short-circuit before we reach the user prompt.
+            reviewer_mock.run.side_effect = [
+                _ok_result("1. severity: major\nproblem: alpha beta gamma needs work"),
+                _ok_result("1. severity: major\nproblem: delta epsilon zeta different issue"),
+            ]
             fixer_mock = MagicMock()
             fixer_mock.run.return_value = _ok_result("fixed")
             mock_make.side_effect = lambda name, cfg: (

@@ -728,3 +728,42 @@ def test_provenance_format_output():
     cfg.branch_prefix = "test/"
     output = prov.format(cfg)
     assert "branch_prefix: 'test/'  (myfile.yaml)" in output
+
+
+def test_design_stance_defaults():
+    cfg = load_config(None)
+    assert cfg.design_stance.implementation_scope == "unspecified"
+    assert cfg.design_stance.backward_compatibility == "unspecified"
+    assert cfg.design_stance.existing_tests == "unspecified"
+    assert cfg.design_stance.api_stability == "unspecified"
+    assert cfg.design_stance.notes == ""
+
+
+def test_design_stance_from_yaml(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(
+        yaml.dump(
+            {
+                "design_stance": {
+                    "implementation_scope": "single_pass",
+                    "backward_compatibility": "required",
+                    "existing_tests": "must_pass",
+                    "api_stability": "extend_only",
+                    "notes": "no rocket science",
+                }
+            }
+        )
+    )
+    cfg = load_config(config_file)
+    assert cfg.design_stance.implementation_scope == "single_pass"
+    assert cfg.design_stance.backward_compatibility == "required"
+    assert cfg.design_stance.existing_tests == "must_pass"
+    assert cfg.design_stance.api_stability == "extend_only"
+    assert cfg.design_stance.notes == "no rocket science"
+
+
+def test_design_stance_invalid_value_rejected(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"design_stance": {"implementation_scope": "bogus"}}))
+    with pytest.raises(ValueError, match="implementation_scope"):
+        load_config(config_file)

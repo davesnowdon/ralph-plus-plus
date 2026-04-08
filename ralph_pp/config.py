@@ -352,6 +352,34 @@ class PrdJsonReviewConfig:
     enabled: bool = True
 
 
+ImplementationScope = Literal["unspecified", "single_pass", "incremental"]
+BackwardCompat = Literal["unspecified", "required", "not_required"]
+ExistingTests = Literal["unspecified", "must_pass", "can_update"]
+ApiStability = Literal["unspecified", "extend_only", "can_break"]
+
+_VALID_IMPLEMENTATION_SCOPE: set[str] = {"unspecified", "single_pass", "incremental"}
+_VALID_BACKWARD_COMPAT: set[str] = {"unspecified", "required", "not_required"}
+_VALID_EXISTING_TESTS: set[str] = {"unspecified", "must_pass", "can_update"}
+_VALID_API_STABILITY: set[str] = {"unspecified", "extend_only", "can_break"}
+
+
+@dataclass
+class DesignStanceConfig:
+    """Design-stance answers injected into the PRD generator prompt (#121).
+
+    Each field defaults to ``"unspecified"`` so the generator gets a clean
+    prompt unless the user explicitly opts in to a constraint. Setting any
+    field to a non-default value adds it as a hard constraint to the PRD
+    generation prompt.
+    """
+
+    implementation_scope: ImplementationScope = "unspecified"
+    backward_compatibility: BackwardCompat = "unspecified"
+    existing_tests: ExistingTests = "unspecified"
+    api_stability: ApiStability = "unspecified"
+    notes: str = ""
+
+
 @dataclass
 class PostReviewConfig:
     """Review config for post-run review loop."""
@@ -437,6 +465,9 @@ class Config:
     prd_review: PrdReviewConfig = field(default_factory=PrdReviewConfig)
     prd_json_review: PrdJsonReviewConfig = field(default_factory=PrdJsonReviewConfig)
     post_review: PostReviewConfig = field(default_factory=PostReviewConfig)
+
+    # Design-stance answers fed into PRD generation (#121)
+    design_stance: DesignStanceConfig = field(default_factory=DesignStanceConfig)
 
     # Ralph
     ralph: RalphConfig = field(default_factory=RalphConfig)
@@ -733,6 +764,38 @@ def _build_config(data: dict[str, Any]) -> Config:
             prompt_template=o.get("prompt_template", defaults.prompt_template),
             story_filter=o.get("story_filter", defaults.story_filter),
             max_diff_chars=int(o.get("max_diff_chars", defaults.max_diff_chars)),
+        )
+
+    if "design_stance" in data:
+        ds = data["design_stance"]
+        ds_defaults = DesignStanceConfig()
+
+        def _parse_choice(key: str, valid: set[str]) -> str:
+            value = ds.get(key, getattr(ds_defaults, key))
+            if value not in valid:
+                raise ValueError(
+                    f"Invalid design_stance.{key}: {value!r} (expected one of {sorted(valid)})"
+                )
+            return cast(str, value)
+
+        cfg.design_stance = DesignStanceConfig(
+            implementation_scope=cast(
+                ImplementationScope,
+                _parse_choice("implementation_scope", _VALID_IMPLEMENTATION_SCOPE),
+            ),
+            backward_compatibility=cast(
+                BackwardCompat,
+                _parse_choice("backward_compatibility", _VALID_BACKWARD_COMPAT),
+            ),
+            existing_tests=cast(
+                ExistingTests,
+                _parse_choice("existing_tests", _VALID_EXISTING_TESTS),
+            ),
+            api_stability=cast(
+                ApiStability,
+                _parse_choice("api_stability", _VALID_API_STABILITY),
+            ),
+            notes=str(ds.get("notes", ds_defaults.notes)),
         )
 
     cfg.hooks = data.get("hooks", {})

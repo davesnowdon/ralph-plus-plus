@@ -167,7 +167,12 @@ class Orchestrator:
         ensure_prd_skills(self.config, base)
         run_hooks("pre_prd_generate", self.config.hooks, base)
         prd_file = generate_prd(
-            self.feature, base, self.config, manual=manual_prd, prd_prompt=prd_prompt
+            self.feature,
+            base,
+            self.config,
+            manual=manual_prd,
+            prd_prompt=prd_prompt,
+            repo_path=self.config.repo_path,
         )
         run_hooks("post_prd_generate", self.config.hooks, base)
         if not skip_review:
@@ -207,7 +212,12 @@ class Orchestrator:
         ensure_prd_skills(self.config, self.worktree_path)
         run_hooks("pre_prd_generate", self.config.hooks, self.worktree_path)
         prd_file = generate_prd(
-            self.feature, self.worktree_path, self.config, manual=manual_prd, prd_prompt=prd_prompt
+            self.feature,
+            self.worktree_path,
+            self.config,
+            manual=manual_prd,
+            prd_prompt=prd_prompt,
+            repo_path=self.config.repo_path,
         )
         run_hooks("post_prd_generate", self.config.hooks, self.worktree_path)
         if not skip_review:
