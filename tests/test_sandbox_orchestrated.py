@@ -3156,3 +3156,97 @@ class TestSameFindingConvergence:
         content = iter_prompt.read_text()
         assert "REPEATED FAILURE" in content
         assert "FUNDAMENTALLY different" in content
+
+
+# ── Issue #124: emit final Progress line on COMPLETE signal ────────────
+
+
+class TestFinalProgressOnComplete:
+    def test_final_progress_emitted_on_complete_signal(self, tmp_path, capsys):
+        """When the coder signals COMPLETE, a Progress line should print before
+        handing off to post-run review (#124)."""
+        worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+        prd_json.write_text(
+            json.dumps(
+                {
+                    "userStories": [
+                        {"id": "US-001", "title": "A", "passes": True},
+                        {"id": "US-002", "title": "B", "passes": True},
+                        {"id": "US-003", "title": "C", "passes": True},
+                    ]
+                }
+            )
+        )
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=0)
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(
+                returncode=0,
+                stdout="All stories complete.\n<promise>COMPLETE</promise>",
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is True
+        captured = capsys.readouterr()
+        assert "Progress: 3/3 stories done" in captured.out
+        assert "Ralph signaled COMPLETE" in captured.out
+
+    def test_partial_complete_signal_does_not_emit_final_progress(self, tmp_path, capsys):
+        """If the coder signals COMPLETE while stories are still false,
+        the function continues and the final-progress line MUST NOT fire."""
+        worktree = _setup_worktree(tmp_path)
+        prd_json = worktree / "scripts" / "ralph" / "prd.json"
+        prd_json.write_text(
+            json.dumps(
+                {
+                    "userStories": [
+                        {"id": "US-001", "title": "A", "passes": True},
+                        {"id": "US-002", "title": "B", "passes": False},
+                    ]
+                }
+            )
+        )
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=0)
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(
+                returncode=0,
+                stdout="kind of done\n<promise>COMPLETE</promise>",
+            )
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        captured = capsys.readouterr()
+        assert "still have passes=false" in captured.out
