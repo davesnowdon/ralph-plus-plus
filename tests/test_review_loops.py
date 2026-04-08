@@ -173,7 +173,12 @@ class TestPrdReviewLoopMaxCycles:
             patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
         ):
             reviewer_mock = MagicMock()
-            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            # Different findings each cycle so the #118 convergence detector
+            # doesn't short-circuit before we reach the user prompt.
+            reviewer_mock.run.side_effect = [
+                _ok_result("1. severity: major\nproblem: alpha beta gamma needs work"),
+                _ok_result("1. severity: major\nproblem: delta epsilon zeta different issue"),
+            ]
             fixer_mock = MagicMock()
             fixer_mock.run.return_value = _ok_result("fixed")
             mock_make.side_effect = lambda name, cfg: (
@@ -365,20 +370,40 @@ class TestPostReviewLoopMaxCycles:
 
 
 class TestPromptMaxCycles:
+    """Interactive-path tests for ``prompt_max_cycles``.
+
+    The pytest environment has no TTY, so by default
+    :func:`is_non_interactive` returns True and the function short-circuits
+    the click prompt. Each test here patches ``is_non_interactive`` to
+    ``False`` to exercise the real stdin path.
+    """
+
     def test_choice_1_returns_quit(self):
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="1"):
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="1"),
+        ):
             assert prompt_max_cycles("PRD", 3) == "quit"
 
     def test_choice_2_returns_retry(self):
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="2"):
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="2"),
+        ):
             assert prompt_max_cycles("PRD", 3) == "retry"
 
     def test_choice_3_returns_continue(self):
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="3"):
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="3"),
+        ):
             assert prompt_max_cycles("PRD", 3) == "continue"
 
     def test_custom_continue_label(self, capsys):
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="3"):
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="3"),
+        ):
             result = prompt_max_cycles(
                 "Post-run", 3, continue_label="Accept — finish without reviewer approval"
             )
@@ -386,7 +411,10 @@ class TestPromptMaxCycles:
 
     def test_explore_option_disabled_by_default(self):
         """Without allow_explore, choice 4 must not be a valid choice."""
-        with patch("ralph_pp.steps.prd.click.prompt") as mock_prompt:
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt") as mock_prompt,
+        ):
             mock_prompt.return_value = "3"
             prompt_max_cycles("PRD", 3)
         # Inspect the click.prompt call to confirm only 1/2/3 were offered
@@ -398,17 +426,21 @@ class TestPromptMaxCycles:
 
     def test_explore_option_enabled(self):
         """When allow_explore=True, choice 4 returns 'explore' (#120)."""
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="4"):
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="4"),
+        ):
             assert prompt_max_cycles("PRD", 3, allow_explore=True) == "explore"
 
     def test_explore_returns_other_actions_normally(self):
         """allow_explore doesn't break the existing 1/2/3 mappings."""
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="1"):
-            assert prompt_max_cycles("PRD", 3, allow_explore=True) == "quit"
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="2"):
-            assert prompt_max_cycles("PRD", 3, allow_explore=True) == "retry"
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="3"):
-            assert prompt_max_cycles("PRD", 3, allow_explore=True) == "continue"
+        with patch("ralph_pp.steps.prd.is_non_interactive", return_value=False):
+            with patch("ralph_pp.steps.prd.click.prompt", return_value="1"):
+                assert prompt_max_cycles("PRD", 3, allow_explore=True) == "quit"
+            with patch("ralph_pp.steps.prd.click.prompt", return_value="2"):
+                assert prompt_max_cycles("PRD", 3, allow_explore=True) == "retry"
+            with patch("ralph_pp.steps.prd.click.prompt", return_value="3"):
+                assert prompt_max_cycles("PRD", 3, allow_explore=True) == "continue"
 
 
 class TestExploreOption:
@@ -500,6 +532,143 @@ class TestExploreOption:
 
             # Should not raise — falls back gracefully
             review_prd_loop(prd_file, tmp_path, config)
+
+
+class TestPromptMaxCyclesNonInteractive:
+    """Non-interactive path for ``prompt_max_cycles`` — issue #128.
+
+    In unattended runs (no TTY, RALPH_NON_INTERACTIVE=1, or
+    non_interactive.enabled=True) the function must NOT read stdin.
+    """
+
+    def test_skips_stdin_and_applies_continue_policy(self):
+        # Default stdin patching: pytest has no TTY, so non-interactive path runs.
+        with patch("ralph_pp.steps.prd.click.prompt") as mock_click:
+            action = prompt_max_cycles("PRD", 3, policy="continue")
+        assert action == "continue"
+        mock_click.assert_not_called()
+
+    def test_abort_policy_returns_quit(self):
+        with patch("ralph_pp.steps.prd.click.prompt") as mock_click:
+            action = prompt_max_cycles("PRD", 3, policy="abort")
+        assert action == "quit"
+        mock_click.assert_not_called()
+
+    def test_retry_once_returns_retry_then_continue(self):
+        with patch("ralph_pp.steps.prd.click.prompt") as mock_click:
+            first = prompt_max_cycles("PRD", 3, policy="retry-once", retry_used=False)
+            second = prompt_max_cycles("PRD", 3, policy="retry-once", retry_used=True)
+        assert first == "retry"
+        assert second == "continue"
+        mock_click.assert_not_called()
+
+    def test_env_var_forces_non_interactive(self, monkeypatch):
+        from ralph_pp.steps.prd import is_non_interactive
+
+        monkeypatch.setenv("RALPH_NON_INTERACTIVE", "1")
+        # Even with a fake TTY, env var wins.
+        with patch("ralph_pp.steps.prd.sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            assert is_non_interactive() is True
+
+    def test_config_enabled_forces_non_interactive(self):
+        from ralph_pp.config import NonInteractiveConfig
+        from ralph_pp.steps.prd import is_non_interactive
+
+        with patch("ralph_pp.steps.prd.sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            assert is_non_interactive(NonInteractiveConfig(enabled=True)) is True
+
+    def test_tty_without_overrides_is_interactive(self, monkeypatch):
+        from ralph_pp.config import NonInteractiveConfig
+        from ralph_pp.steps.prd import is_non_interactive
+
+        monkeypatch.delenv("RALPH_NON_INTERACTIVE", raising=False)
+        with patch("ralph_pp.steps.prd.sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            assert is_non_interactive(NonInteractiveConfig(enabled=False)) is False
+
+    def test_prd_review_loop_continues_unattended(self, tmp_path):
+        """End-to-end: PRD review hitting max cycles under non-interactive default."""
+        config = _make_config(prd_review=_review_cfg(max_cycles=1))
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.click.prompt") as mock_click,
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            # Must return cleanly, not raise or hang.
+            review_prd_loop(prd_file, tmp_path, config)
+
+        mock_click.assert_not_called()
+
+    def test_post_review_loop_continues_unattended(self, tmp_path):
+        """End-to-end: post-run review hitting max cycles under non-interactive default."""
+        config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=1))
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.click.prompt") as mock_click,
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            result = post_review_loop(tmp_path, config)
+        assert result.outcome == "accepted"
+        mock_click.assert_not_called()
+
+    def test_prd_review_loop_aborts_when_policy_abort(self, tmp_path):
+        """Config-level abort policy should raise MaxCyclesAbort without prompting."""
+        config = _make_config(prd_review=_review_cfg(max_cycles=1))
+        config.non_interactive.on_max_cycles_prd = "abort"
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.click.prompt") as mock_click,
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            with pytest.raises(MaxCyclesAbort):
+                review_prd_loop(prd_file, tmp_path, config)
+
+        mock_click.assert_not_called()
 
 
 class TestPostReviewFixer:
@@ -680,6 +849,81 @@ class TestPostReviewDiff:
         )
         assert "diff --git a/foo b/foo" in prompt
         assert "all changes since run start" in prompt
+
+    def test_incremental_diff_on_subsequent_cycles(self, tmp_path):
+        """#94: cycle 2+ should NOT include the full diff, only the fixer's
+        incremental diff via the previous_findings context block."""
+        from ralph_pp.config import OrchestratedConfig
+
+        config = _make_config(
+            post_review=PostReviewConfig(
+                reviewer="codex",
+                fixer="claude",
+                max_cycles=3,
+            ),
+        )
+        config.orchestrated = OrchestratedConfig()
+
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+        base_sha_file = tmp_path / "scripts" / "ralph" / ".base-sha"
+        base_sha_file.write_text("abc1234")
+
+        full_diff_str = "diff --git a/foo b/foo\n+the full original diff\n" * 50
+        fixer_diff_str = "diff --git a/foo b/foo\n+small fix\n"
+        prompts_seen: list[str] = []
+
+        # First get_diff call returns the full diff; subsequent calls
+        # return the fixer's incremental diff.
+        diff_calls = {"n": 0}
+
+        def fake_get_diff(*args, **kwargs):
+            diff_calls["n"] += 1
+            return full_diff_str if diff_calls["n"] == 1 else fixer_diff_str
+
+        returns = [
+            _ok_result("1. severity: major\nproblem: thing-a"),
+            _ok_result("1. severity: major\nproblem: thing-b"),
+            _ok_result("LGTM"),
+        ]
+
+        def reviewer_run(prompt, cwd):
+            prompts_seen.append(prompt)
+            return returns.pop(0)
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="def5678"),
+            patch("ralph_pp.steps.post_review.get_diff", side_effect=fake_get_diff),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.side_effect = reviewer_run
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            post_review_loop(tmp_path, config)
+
+        assert len(prompts_seen) == 3, f"expected 3 reviewer calls, got {len(prompts_seen)}"
+
+        # Cycle 1 includes the full diff
+        assert "the full original diff" in prompts_seen[0]
+        assert "all changes since run start" in prompts_seen[0]
+
+        # Cycle 2+ omits the full diff
+        assert "the full original diff" not in prompts_seen[1], (
+            "cycle 2 must NOT include the full diff (#94)"
+        )
+        assert "the full original diff" not in prompts_seen[2]
+        # ...but includes the fixer's incremental diff via the context block
+        assert "small fix" in prompts_seen[1]
+        # ...and the previous findings
+        assert "thing-a" in prompts_seen[1]
+        # ...and the explicit "omitted" marker
+        assert "omitted on this cycle" in prompts_seen[1]
 
     def test_no_diff_when_base_sha_missing(self, tmp_path):
         from ralph_pp.config import OrchestratedConfig

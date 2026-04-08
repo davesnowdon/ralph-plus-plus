@@ -70,13 +70,14 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
         base_sha = base_sha_path.read_text().strip()
         full_diff = get_diff(worktree_path, base_sha)
         full_diff = truncate_diff(full_diff, config.orchestrated.max_diff_chars)
-        diff_text = f"\n## Git diff (all changes since run start)\n\n{full_diff}\n"
+        full_diff_text = f"\n## Git diff (all changes since run start)\n\n{full_diff}\n"
     else:
-        diff_text = ""
+        full_diff_text = ""
 
     total_cycles = 0
     previous_findings: str = ""
     last_fixer_diff: str = ""
+    retry_used = False
     while True:
         for cycle in range(1, review_cfg.max_cycles + 1):
             total_cycles += 1
@@ -85,21 +86,40 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
                 f"({cycle}/{review_cfg.max_cycles} this batch)[/bold]"
             )
 
-            if previous_findings:
-                context = (
-                    "\nThe previous review cycle found these issues (which have since "
-                    "been addressed by a fix pass). Focus on whether the fixes are "
-                    "adequate and whether any NEW issues remain. Do not re-raise issues "
-                    "that have been resolved:\n\n"
-                    f"{previous_findings}\n"
+            # #94: only the first review cycle sends the full diff. After
+            # the fixer runs, subsequent cycles see only the incremental
+            # fixer diff plus the previous findings — the reviewer's job
+            # then is "did the fix address those findings?" rather than
+            # "review everything from scratch". This dramatically reduces
+            # token cost on multi-cycle runs while keeping the signal
+            # the reviewer needs to confirm or extend the previous findings.
+            if total_cycles == 1 or not previous_findings:
+                diff_text = full_diff_text
+                context = ""
+            else:
+                # Subsequent cycles: skip the full diff entirely. The
+                # incremental fixer_diff is folded into the context block
+                # below.
+                diff_text = (
+                    "\n## Git diff\n\n"
+                    "(omitted on this cycle — see the prior findings and the "
+                    "incremental fixer diff below; focus on whether the fix "
+                    "addresses them and whether any NEW issues remain)\n"
                 )
+                context_parts = [
+                    "\nThe previous review cycle found these issues. The fixer "
+                    "has since attempted to address them. Focus on whether the "
+                    "fixes are adequate and whether any NEW issues remain. Do "
+                    "NOT re-raise issues that have been resolved:\n\n"
+                    f"{previous_findings}\n"
+                ]
                 if last_fixer_diff:
-                    context += (
-                        "\nThe fixer made the following changes to address those findings:\n\n"
+                    context_parts.append(
+                        "\nThe fixer made the following changes "
+                        "(this is the only diff you need to review this cycle):\n\n"
                         f"{last_fixer_diff}\n"
                     )
-            else:
-                context = ""
+                context = "".join(context_parts)
 
             test_cmds = config.orchestrated.test_commands
             if test_cmds:
@@ -161,6 +181,9 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
             "Post-run",
             review_cfg.max_cycles,
             continue_label="Accept — finish without reviewer approval",
+            non_interactive=config.non_interactive,
+            policy=config.non_interactive.on_max_cycles_post,
+            retry_used=retry_used,
         )
         if action == "quit":
             raise MaxCyclesAbort
@@ -168,4 +191,5 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
             console.print("[yellow]Accepting implementation without reviewer approval[/yellow]")
             return PostReviewResult(outcome="accepted", cycles=total_cycles)
         # action == "retry" → loop again
+        retry_used = True
         console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")

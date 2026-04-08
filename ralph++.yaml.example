@@ -102,6 +102,17 @@ orchestrated:
     - "pytest"
     - "ruff check ."
   backout_on_failure: true
+  max_consecutive_infra_failures: 3 # [project] abort after N coder infra failures in a row
+                                    #           (OAuth expiry, network, timeout). 0 disables.
+  on_retry_exhaustion: skip-story   # [project] skip-story | abort
+                                    # When an iteration exhausts retries, skip the
+                                    # failing story and continue instead of aborting
+                                    # the whole backlog.
+  # #126: detect when consecutive retries cite the same finding and stop
+  # wasting cycles. Retry prompts are escalated ("REPEATED FAILURE,
+  # take a fundamentally different approach") on same-finding repeats.
+  max_same_finding_retries: 2        # 0 disables convergence detection
+  same_finding_similarity_threshold: 0.75  # Jaccard threshold, 0.0–1.0
 
   review_prompt: >
     Review the following git diff against the requirements in {prd_file}.
@@ -120,6 +131,30 @@ orchestrated:
   # prompt_template: |
   #   You are implementing iteration {iteration}. The PRD is at {prd_file}.
   #   Previous review findings: {review_findings}
+
+# ── Design stance (#121) ───────────────────────────────────────────────
+# [user/project] Hard constraints injected into the PRD generation prompt
+# so the generator avoids scope-inappropriate architectural choices.
+# Each field defaults to "unspecified" — that means no constraint is added.
+design_stance:
+  implementation_scope: unspecified    # unspecified | single_pass | incremental
+  backward_compatibility: unspecified  # unspecified | required | not_required
+  existing_tests: unspecified          # unspecified | must_pass | can_update
+  api_stability: unspecified           # unspecified | extend_only | can_break
+  notes: ""                             # free-form additional constraints
+
+# ── Non-interactive defaults ───────────────────────────────────────────
+# [user/project] How review gates behave when running unattended
+# (no TTY, RALPH_NON_INTERACTIVE=1, --non-interactive, or enabled: true).
+# on_max_cycles_* values:
+#   continue   — log a warning and proceed without reviewer approval
+#   abort      — raise MaxCyclesAbort and stop the workflow
+#   retry-once — run one more batch of cycles, then continue
+non_interactive:
+  enabled: false
+  on_max_cycles_prd: continue
+  on_max_cycles_prd_json: continue
+  on_max_cycles_post: continue
 
 # ── Lifecycle hooks ────────────────────────────────────────────────────
 # [user/project] Commands run at specific workflow stages.

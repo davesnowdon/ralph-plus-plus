@@ -11,8 +11,11 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import subprocess
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -159,7 +162,13 @@ def run_sandbox(worktree_path: Path, config: Config) -> RunSummary:
         finally:
             _save_counters(worktree_path, counters["iterations"], counters["retries"])
     else:
-        success = _run_delegated(worktree_path, config)
+        # #109: delegated mode runs the sandbox's internal Ralph loop, so
+        # ralph++ has to scrape its stdout to count iterations for the
+        # final summary banner.
+        try:
+            success = _run_delegated(worktree_path, config, counters)
+        finally:
+            _save_counters(worktree_path, counters["iterations"], counters["retries"])
 
     # Build summary from post-run state
     prd_json = worktree_path / "scripts" / "ralph" / "prd.json"
@@ -321,6 +330,74 @@ def format_stories(prd_json: Path, story_ids: set[str]) -> str:
     return "\n\n".join(parts)
 
 
+def enforce_passes_baseline(
+    prd_json: Path,
+    baseline: dict[str, bool],
+    *,
+    approved: set[str] | None = None,
+) -> set[str]:
+    """Restore ``passes`` in *prd_json* to the *baseline* for unapproved stories.
+
+    The reviewer (not the coder) owns the ``passes`` field. If the coder
+    flipped a story to ``true`` during an iteration but the reviewer has not
+    approved it, we must roll the flag back to its baseline state. This is
+    the structural defense for issue #129.
+
+    *approved* is the set of story IDs that the reviewer *has* approved this
+    iteration (typically empty at rejection time; only populated when we want
+    to preserve reviewer-approved flips). Stories in *approved* retain their
+    current ``passes`` value.
+
+    Returns the set of story IDs whose ``passes`` was rolled back.
+    """
+    approved = approved or set()
+    data = load_prd(prd_json)
+    changed: set[str] = set()
+    for story in data["userStories"]:
+        sid = story.get("id")
+        if not sid or sid in approved:
+            continue
+        current = bool(story.get("passes", False))
+        expected = baseline.get(sid, False)
+        if current != expected:
+            story["passes"] = expected
+            changed.add(sid)
+    if changed:
+        prd_json.write_text(json.dumps(data, indent=2) + "\n")
+    return changed
+
+
+def next_target_story(
+    prd_json: Path,
+    excluded_ids: set[str] | None = None,
+    story_filter: set[str] | None = None,
+) -> str | None:
+    """Return the story ID the coder is expected to pick next, or ``None``.
+
+    Mirrors the orchestrated coder prompt rule: "highest priority story where
+    ``passes`` is ``false``". Stories in *excluded_ids* (skipped after
+    retry exhaustion) and those outside *story_filter* are ignored.
+    """
+    excluded = excluded_ids or set()
+    data = load_prd(prd_json)
+    candidates: list[dict[str, Any]] = []
+    for story in data["userStories"]:
+        sid = story.get("id")
+        if not sid or sid in excluded:
+            continue
+        if story_filter is not None and sid not in story_filter:
+            continue
+        if story.get("passes", False):
+            continue
+        candidates.append(story)
+    if not candidates:
+        return None
+    # Stable order: by priority (lower is higher priority, per the
+    # orchestrated-mode prompt convention), then by id for determinism.
+    candidates.sort(key=lambda s: (int(s.get("priority", 999)), str(s.get("id", ""))))
+    return str(candidates[0].get("id"))
+
+
 def format_all_completed(prd_json: Path) -> tuple[str, list[str]]:
     """Format all completed stories and return IDs of incomplete ones.
 
@@ -341,19 +418,107 @@ these specific issues will result in another rejection:
 
 """
 
+_RETRY_ESCALATION_HEADER = """\
+⚠ RETRY {attempt}/{max_attempts} — REPEATED FAILURE ({repeat_count}x)
+You have failed to address these specific findings {repeat_count} times
+in a row. Your current approach is not working. You MUST:
 
-def _wrap_retry_findings(findings: str, attempt: int, max_attempts: int) -> str:
-    """Prepend a structured header to findings on retry attempts."""
+  1. Re-read the relevant source files from scratch, paying attention
+     to the code paths cited in the reviewer's evidence below — not
+     just the area you have been editing.
+  2. Take a FUNDAMENTALLY different approach than your previous attempts.
+  3. If the reviewer cites a specific function, class, or code path,
+     start by reading that exact location and understanding why the
+     previous change did not satisfy the requirement.
+
+The reviewer's findings are reproduced verbatim below:
+
+"""
+
+
+# #126: token-set Jaccard similarity used to detect same-finding convergence.
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _normalize_findings(text: str) -> set[str]:
+    """Normalize reviewer output for similarity comparison.
+
+    Lowercased alphanumeric tokens only — ignores punctuation, whitespace,
+    and ordering. Short tokens (<3 chars) are dropped because they add noise
+    without carrying semantic weight.
+    """
+    if not text:
+        return set()
+    return {tok.lower() for tok in _TOKEN_RE.findall(text) if len(tok) >= 3}
+
+
+def findings_similarity(a: str, b: str) -> float:
+    """Return Jaccard similarity (0.0–1.0) between two reviewer outputs.
+
+    Returns 0.0 when either side is empty. Used to detect #126 convergence:
+    when retry N+1 cites essentially the same finding as retry N, the coder
+    has locked onto a wrong interpretation and the orchestrator should
+    escalate the prompt or stop wasting cycles.
+    """
+    tokens_a = _normalize_findings(a)
+    tokens_b = _normalize_findings(b)
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    return intersection / union if union else 0.0
+
+
+def _wrap_retry_findings(
+    findings: str,
+    attempt: int,
+    max_attempts: int,
+    repeat_count: int = 0,
+) -> str:
+    """Prepend a structured header to findings on retry attempts.
+
+    When *repeat_count* is >= 1 (meaning this is the N-th consecutive retry
+    that cites substantially the same findings) the header escalates to
+    explicitly call out the repeat pattern and demand a different approach
+    (#126).
+    """
     if attempt <= 1 or not findings:
         return findings
+    if repeat_count >= 1:
+        return (
+            _RETRY_ESCALATION_HEADER.format(
+                attempt=attempt, max_attempts=max_attempts, repeat_count=repeat_count + 1
+            )
+            + findings
+        )
     return _RETRY_HEADER.format(attempt=attempt, max_attempts=max_attempts) + findings
 
 
 # ── Delegated mode ─────────────────────────────────────────────────────
 
 
-def _run_delegated(worktree_path: Path, config: Config) -> bool:
-    """Mode 1: Invoke ralph-sandbox with its built-in Ralph loop."""
+# #109: Match lines like "Ralph Iteration 8 of 30 (claude)" emitted by the
+# sandbox's built-in loop. Tolerant to surrounding box characters.
+_DELEGATED_ITERATION_RE = re.compile(
+    r"Ralph\s+Iteration\s+(\d+)\s+of\s+(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _run_delegated(
+    worktree_path: Path,
+    config: Config,
+    counters: dict[str, int] | None = None,
+) -> bool:
+    """Mode 1: Invoke ralph-sandbox with its built-in Ralph loop.
+
+    Tees the sandbox's stdout to the terminal so the user still sees the
+    live stream, while parsing for ``Ralph Iteration N of M`` lines so
+    ``counters['iterations']`` reflects the actual sandbox iteration count
+    in the final summary banner (#109).
+    """
+    if counters is None:
+        counters = {"iterations": 0, "retries": 0}
     console.print("[bold cyan]\n── Delegated mode ──[/bold cyan]")
 
     cmd = _build_sandbox_command(
@@ -364,14 +529,37 @@ def _run_delegated(worktree_path: Path, config: Config) -> bool:
     )
 
     console.print("[dim]$ " + " ".join(cmd[:5]) + " ...[/dim]")
-    result = subprocess.run(cmd, text=True)
 
-    if result.returncode == 0:
+    # Stream stdout line-by-line so we can both forward to the user AND
+    # parse for iteration progress lines.
+    proc = subprocess.Popen(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            # Forward verbatim — disable Rich markup parsing because the
+            # subprocess line may contain bracketed text (#125).
+            console.print(line.rstrip("\n"), markup=False, highlight=False)
+            match = _DELEGATED_ITERATION_RE.search(line)
+            if match:
+                try:
+                    counters["iterations"] = int(match.group(1))
+                except ValueError:
+                    pass
+    finally:
+        proc.wait()
+
+    returncode = proc.returncode
+    if returncode == 0:
         console.print("[green]✓ Ralph completed successfully[/green]")
         return True
-    else:
-        console.print(f"[red]✗ Ralph exited with code {result.returncode}[/red]")
-        return False
+    console.print(f"[red]✗ Ralph exited with code {returncode}[/red]")
+    return False
 
 
 # ── Orchestrated mode ──────────────────────────────────────────────────
@@ -381,19 +569,27 @@ def _write_coder_prompt(
     worktree_path: Path,
     findings: str = "",
     story_filter: list[str] | None = None,
+    skipped_story_ids: set[str] | None = None,
 ) -> None:
     """Write the orchestrated coder prompt, optionally with review findings."""
     ralph_dir = worktree_path / "scripts" / "ralph"
     ralph_dir.mkdir(parents=True, exist_ok=True)
 
+    parts: list[str] = []
     if story_filter:
         ids = ", ".join(story_filter)
-        filter_instruction = (
+        parts.append(
             f"\n   **IMPORTANT: Only work on these story IDs: {ids}. "
             "Skip all other stories even if they have `passes` set to `false`.**"
         )
-    else:
-        filter_instruction = ""
+    if skipped_story_ids:
+        skipped = ", ".join(sorted(skipped_story_ids))
+        parts.append(
+            f"\n   **IMPORTANT: Do NOT work on these story IDs (they have been "
+            f"skipped after exhausting retries): {skipped}. "
+            "Pick the next highest-priority unfinished story instead.**"
+        )
+    filter_instruction = "".join(parts)
 
     prompt = _ORCHESTRATED_CODER_PROMPT.replace("{story_filter_instruction}", filter_instruction)
     if findings:
@@ -438,6 +634,55 @@ def truncate_diff(diff: str, max_chars: int) -> str:
     )
 
 
+def summarize_findings_for_history(
+    iteration: int,
+    findings: str,
+    *,
+    max_lines: int = 3,
+) -> list[str]:
+    """Extract one-line summaries from a reviewer's findings block (#102).
+
+    The history is shown to the next iteration's reviewer, so we want
+    short, scannable lines — not the full evidence/recommendation block.
+    Picks up to *max_lines* lines per iteration.
+    """
+    if not findings or "LGTM" in findings.split("\n", 1)[0]:
+        return []
+    summary: list[str] = []
+    for raw in findings.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # Skip prose preambles; only capture lines that look like findings.
+        lower = line.lower()
+        if lower.startswith(("severity:", "problem:", "file:", "1.", "2.", "3.")):
+            # Trim long lines
+            if len(line) > 140:
+                line = line[:140] + "..."
+            summary.append(f"iter {iteration}: {line}")
+            if len(summary) >= max_lines:
+                break
+    return summary
+
+
+def _format_prior_findings_summary(prior: list[str] | None) -> str:
+    """Render prior-iteration findings as a context block for the reviewer (#102).
+
+    Returns an empty string when *prior* is empty so the placeholder
+    substitutes to nothing in the prompt.
+    """
+    if not prior:
+        return ""
+    lines = "\n".join(f"  - {entry}" for entry in prior)
+    return (
+        "\n## Prior iteration findings (this run)\n\n"
+        "Earlier iterations in this run produced these findings. Watch for\n"
+        "the same classes of bugs (e.g., contract enforcement, defensive copies,\n"
+        "edge cases) in this iteration's changes:\n\n"
+        f"{lines}\n"
+    )
+
+
 def _review_iteration(
     iteration: int,
     diff: str,
@@ -448,13 +693,24 @@ def _review_iteration(
     stories_under_review: str = "",
     test_results: str = "",
     first_review: bool = False,
+    prior_iteration_findings: list[str] | None = None,
 ) -> ReviewResult:
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
-    # Apply reviewer_timeout to the tool config if not already set
+    # Apply reviewer_timeout to the tool config if not already set.
+    # Tool config wins when both are set; log the precedence so users can
+    # understand why their orchestrated.reviewer_timeout setting may
+    # appear to have no effect (#82).
     tool_cfg = config.get_tool(orch.reviewer)
     if orch.reviewer_timeout and not tool_cfg.timeout:
         tool_cfg = dataclasses.replace(tool_cfg, timeout=orch.reviewer_timeout)
+    elif orch.reviewer_timeout and tool_cfg.timeout:
+        logger.debug(
+            "orchestrated.reviewer_timeout=%d ignored; tool '%s' already has timeout=%d",
+            orch.reviewer_timeout,
+            orch.reviewer,
+            tool_cfg.timeout,
+        )
 
     # Use the tool factory to augment Bash permissions when auto_allow_test_commands
     # is enabled, matching the post_review path (#89).
@@ -496,6 +752,7 @@ def _review_iteration(
         diff=diff,
         stories_under_review=stories_under_review,
         previous_findings=context,
+        prior_findings_summary=_format_prior_findings_summary(prior_iteration_findings),
         test_commands_guidance=_test_commands_guidance(orch),
         test_results=test_results,
     )
@@ -580,6 +837,106 @@ def _merge_env(extra: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def _format_duration(seconds: float) -> str:
+    """Format a wall-clock duration in seconds as 'Xm YYs' (#103)."""
+    seconds = max(0.0, float(seconds))
+    minutes, secs = divmod(int(round(seconds)), 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m {secs}s"
+    return f"{minutes}m {secs:02d}s"
+
+
+def _write_iteration_progress_entry(
+    worktree_path: Path,
+    iteration: int,
+    iteration_passed: bool,
+    duration_seconds: float,
+    findings: str,
+) -> None:
+    """Append a per-iteration entry to ``scripts/ralph/progress.txt``.
+
+    Includes duration (#103) and a one-line failure reason for failed
+    iterations (#83).
+    """
+    progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+    progress_file.parent.mkdir(parents=True, exist_ok=True)
+    status = "passed" if iteration_passed else "failed"
+    failure_summary = ""
+    if not iteration_passed and findings:
+        summary = _summarize_findings_for_progress(findings)
+        if summary:
+            failure_summary = f"Reason: {summary}\n"
+    with open(progress_file, "a") as f:
+        f.write(
+            f"\n## Iteration {iteration} — {status} "
+            f"(duration {_format_duration(duration_seconds)})\n"
+            f"{failure_summary}---\n"
+        )
+
+
+def _summarize_findings_for_progress(findings: str, max_chars: int = 240) -> str:
+    """Extract a one-line failure summary from reviewer findings (#83).
+
+    Picks the first finding's problem line if present, otherwise the first
+    non-empty line. Trimmed to *max_chars* with an ellipsis.
+    """
+    if not findings:
+        return ""
+    lines = [line.strip() for line in findings.splitlines() if line.strip()]
+    # Prefer a 'problem:' line if any
+    for line in lines:
+        if line.lower().startswith("problem:"):
+            text = line[len("problem:") :].strip()
+            return text[:max_chars] + ("..." if len(text) > max_chars else "")
+    if lines:
+        text = lines[0]
+        return text[:max_chars] + ("..." if len(text) > max_chars else "")
+    return ""
+
+
+def _skip_story(
+    worktree_path: Path,
+    story_id: str,
+    iteration: int,
+    findings: str,
+    skipped_story_ids: set[str],
+    *,
+    pre_sha: str | None = None,
+    restore_files: dict[Path, str] | None = None,
+) -> None:
+    """Record a retry-exhaustion skip and (in backout mode) reset the worktree.
+
+    - Adds *story_id* to *skipped_story_ids* so future iterations exclude it.
+    - Appends a failure entry to ``scripts/ralph/progress.txt`` with truncated
+      reviewer findings so the post-run review (#127) and humans can see why.
+    - When *pre_sha* is provided, hard-resets the worktree to that SHA and
+      restores *restore_files*, matching the backout path (#127). In
+      fix-in-place mode the caller passes ``pre_sha=None`` so any partial
+      fix-cycle commits are left in place; they can still be rolled back by
+      the post-run review if needed.
+    """
+    skipped_story_ids.add(story_id)
+    console.print(
+        f"  [yellow]Skipping {story_id} after retry exhaustion — advancing to next story[/yellow]"
+    )
+
+    progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+    progress_file.parent.mkdir(parents=True, exist_ok=True)
+    trimmed_findings = (findings or "").strip()
+    if len(trimmed_findings) > 1500:
+        trimmed_findings = trimmed_findings[:1500] + "\n... (truncated)"
+    with open(progress_file, "a") as f:
+        f.write(
+            f"\n## Iteration {iteration} — {story_id} SKIPPED (retry exhaustion)\n"
+            f"Reason: all retries/fix cycles exhausted without reviewer LGTM.\n"
+            f"Last reviewer findings:\n{trimmed_findings or '(none)'}\n---\n"
+        )
+
+    if pre_sha is not None:
+        _backout_to(worktree_path, pre_sha, restore_files=restore_files)
+
+
 def _save_counters(worktree_path: Path, iterations: int, retries: int) -> None:
     """Persist iteration/retry counters for RunSummary."""
     counters = worktree_path / "scripts" / "ralph" / ".run-counters"
@@ -612,7 +969,16 @@ def _run_orchestrated(
 
     last_findings = ""
     consecutive_idle = 0
+    consecutive_infra_failures = 0
     total_retries = 0
+    # #102: rolling list of one-line summaries of findings raised in earlier
+    # iterations of this run, so the inline reviewer can spot recurring bug
+    # classes (defensive copies, contract enforcement, etc.) instead of
+    # treating each iteration in isolation.
+    prior_iteration_findings: list[str] = []
+    # #127: stories that exhausted their retry budget. Excluded from future
+    # iterations so independent downstream work can still make progress.
+    skipped_story_ids: set[str] = set()
     prev_story_status = read_story_status(prd_json)
 
     # Apply story filter: treat non-filtered stories as already complete
@@ -640,9 +1006,43 @@ def _run_orchestrated(
 
         counters["iterations"] = iteration
         completed = sum(1 for v in prev_story_status.values() if v)
+        # #103: per-iteration timing — record start wallclock and start
+        # monotonic so we can emit a duration at the end of the iteration.
+        iter_start_monotonic = time.monotonic()
+        iter_start_wall = datetime.now(UTC).astimezone()
         console.print(
             f"\n[bold]═══ Iteration {iteration}/{config.ralph.max_iterations} "
-            f"({completed}/{total_stories} stories done) ═══[/bold]"
+            f"({completed}/{total_stories} stories done) "
+            f"started {iter_start_wall.strftime('%H:%M:%S')} ═══[/bold]"
+        )
+
+        # #127: Compute the story the coder is expected to pick this
+        # iteration, so that on retry exhaustion we can mark *that* story
+        # as skipped rather than guessing. Also lets us exit early when
+        # every remaining story has been skipped.
+        target_story_id = next_target_story(
+            prd_json,
+            excluded_ids=skipped_story_ids,
+            story_filter=filter_set,
+        )
+        if target_story_id is None and skipped_story_ids:
+            # We ran out of targets *because* stories were skipped. Exit so
+            # the post-run review can surface them. Empty prd.json and
+            # already-done states are handled by the existing completion
+            # checks at the bottom of the loop.
+            console.print(
+                f"[yellow]All remaining stories have been skipped "
+                f"({', '.join(sorted(skipped_story_ids))}) — finishing "
+                "iteration loop[/yellow]"
+            )
+            break
+
+        # Refresh CLAUDE.md with the latest skip list so the coder excludes
+        # stories that previously exhausted their retry budget.
+        _write_coder_prompt(
+            worktree_path,
+            story_filter=orch.story_filter or None,
+            skipped_story_ids=skipped_story_ids or None,
         )
 
         pre_sha = get_head_sha(worktree_path)
@@ -660,6 +1060,14 @@ def _run_orchestrated(
         max_attempts = orch.max_iteration_retries + 1 if orch.backout_on_failure else 1
 
         iteration_passed = False
+        # #126: detect when consecutive retries cite essentially the same
+        # reviewer findings — that means the coder has converged on a wrong
+        # interpretation and continued retries will waste cycles without
+        # making progress.
+        prev_retry_findings = ""
+        same_finding_count = 0
+        converged_on_same_finding = False
+
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 console.print(
@@ -676,7 +1084,9 @@ def _run_orchestrated(
                     iteration=str(iteration),
                     prd_file=str(prd_json),
                     progress=progress_text,
-                    review_findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
+                    review_findings=_wrap_retry_findings(
+                        last_findings, attempt, max_attempts, same_finding_count
+                    ),
                 )
                 iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
                 iter_prompt.write_text(prompt_text)
@@ -688,8 +1098,11 @@ def _run_orchestrated(
                 # coder knows why its previous attempt was rejected.
                 _write_coder_prompt(
                     worktree_path,
-                    findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
+                    findings=_wrap_retry_findings(
+                        last_findings, attempt, max_attempts, same_finding_count
+                    ),
                     story_filter=orch.story_filter or None,
+                    skipped_story_ids=skipped_story_ids or None,
                 )
 
             # Run coder in sandbox
@@ -701,6 +1114,7 @@ def _run_orchestrated(
                 ralph_args=["1"],
             )
             console.print(f"  [dim]Running coder ({orch.coder})...[/dim]")
+            coder_timed_out = False
             try:
                 result = subprocess.run(
                     cmd,
@@ -712,19 +1126,47 @@ def _run_orchestrated(
             except subprocess.TimeoutExpired:
                 console.print(f"  [red]✗ Coder timed out after {orch.coder_timeout}s[/red]")
                 result = subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="timeout")
+                coder_timed_out = True
 
             combined_output = (result.stdout or "") + (result.stderr or "")
             if combined_output:
-                console.print(combined_output)
+                # Raw subprocess output may contain bracketed text that Rich
+                # will try to parse as markup — disable both markup parsing
+                # and syntax highlighting so paths like [foo/bar.py] render
+                # verbatim. See #122/#123/#125.
+                console.print(combined_output, markup=False, highlight=False)
 
             # Check for infra/sandbox failure
             if result.returncode != 0:
-                console.print(f"  [red]✗ Coder process failed (exit {result.returncode})[/red]")
+                # #77: skip the generic failure message when we already
+                # printed a more specific timeout message just above.
+                if not coder_timed_out:
+                    console.print(f"  [red]✗ Coder process failed (exit {result.returncode})[/red]")
                 if orch.backout_on_failure and attempt < max_attempts:
                     _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                     continue
                 console.print("  [red]Infra failure — skipping review[/red]")
+                consecutive_infra_failures += 1
+                if (
+                    orch.max_consecutive_infra_failures > 0
+                    and consecutive_infra_failures >= orch.max_consecutive_infra_failures
+                ):
+                    last_error = (result.stderr or result.stdout or "unknown").strip()
+                    if len(last_error) > 200:
+                        last_error = last_error[:200] + "..."
+                    console.print(
+                        f"[red]✗ {consecutive_infra_failures} consecutive infra "
+                        f"failures — aborting (last error: {last_error})[/red]"
+                    )
+                    console.print(
+                        "[yellow]Fix the underlying issue (auth, network, tool config) "
+                        "and resume with --resume-worktree.[/yellow]"
+                    )
+                    return False
                 break
+
+            # Coder ran cleanly — reset the infra circuit-breaker counter.
+            consecutive_infra_failures = 0
 
             # Check for completion signal — verify against prd.json
             if COMPLETE_SIGNAL in combined_output:
@@ -736,6 +1178,14 @@ def _run_orchestrated(
                 else:
                     relevant = story_status
                 if all(relevant.values()):
+                    # #124: emit one final Progress line so the stream shows
+                    # N/N before handing off to the post-run review. Without
+                    # this, readers see the last in-loop count (e.g. 10/11)
+                    # and only learn the full count from the final banner.
+                    done_count = sum(1 for v in story_status.values() if v)
+                    console.print(
+                        f"  [dim]Progress: {done_count}/{total_stories} stories done[/dim]"
+                    )
                     console.print("[green]Ralph signaled COMPLETE[/green]")
                     return True
                 incomplete = [sid for sid, p in relevant.items() if not p]
@@ -801,7 +1251,9 @@ def _run_orchestrated(
                     worktree_path, orch.test_commands
                 )
                 if test_output:
-                    console.print(test_output)
+                    # Test runner output frequently contains bracketed paths
+                    # (e.g. pytest file references). Render verbatim (#125).
+                    console.print(test_output, markup=False, highlight=False)
                 test_results_text = format_test_results(test_output, tests_ok)
                 if not tests_ok:
                     console.print("  [yellow]Tests failed — treating as review failure[/yellow]")
@@ -831,12 +1283,24 @@ def _run_orchestrated(
                 stories_under_review=stories_text,
                 test_results=test_results_text,
                 first_review=True,
+                prior_iteration_findings=prior_iteration_findings,
             )
             last_findings = review.findings
 
             if review.passed and not tests_failed:
                 if review.minor_only and review.max_severity is not None:
                     console.print("  [dim]Minor findings carried forward[/dim]")
+                # Reviewer owns the passes field (#129): strip any passes
+                # flips the coder made for stories the reviewer did not
+                # actually approve this iteration.
+                reverted = enforce_passes_baseline(
+                    prd_json, prev_story_status, approved=newly_completed
+                )
+                if reverted:
+                    console.print(
+                        f"  [yellow]Rolled back unauthorized passes flip for: "
+                        f"{', '.join(sorted(reverted))}[/yellow]"
+                    )
                 iteration_passed = True
                 break
             elif tests_failed and review.passed:
@@ -845,16 +1309,87 @@ def _run_orchestrated(
                 )
                 last_findings = "Tests failed. " + review.findings
 
+            # Handle review failure.
+            # Reviewer owns the passes field (#129): before we backout or
+            # invoke the fixer, revert any passes flips the coder made this
+            # iteration. Backout mode also relies on restore_files, but
+            # enforcing the baseline here keeps fix-in-place mode safe too.
+            reverted_after_reject = enforce_passes_baseline(prd_json, prev_story_status)
+            if reverted_after_reject:
+                console.print(
+                    f"  [yellow]Rolled back unauthorized passes flip for: "
+                    f"{', '.join(sorted(reverted_after_reject))}[/yellow]"
+                )
+
+            # #126: same-finding convergence detection. Compare the current
+            # rejection's findings against the previous retry's; if they are
+            # essentially the same, bump the counter and maybe escalate /
+            # bail out.
+            if prev_retry_findings:
+                sim = findings_similarity(prev_retry_findings, review.findings)
+                if sim >= orch.same_finding_similarity_threshold:
+                    same_finding_count += 1
+                    console.print(
+                        f"  [yellow]⚠ Same finding detected {same_finding_count + 1}x "
+                        f"in a row (similarity {sim:.2f}) — coder may be converging "
+                        f"on a wrong interpretation[/yellow]"
+                    )
+                else:
+                    same_finding_count = 0
+            prev_retry_findings = review.findings
+
+            if (
+                orch.max_same_finding_retries > 0
+                and same_finding_count >= orch.max_same_finding_retries
+            ):
+                console.print(
+                    f"  [red]✗ Reviewer cited the same finding "
+                    f"{same_finding_count + 1} times in a row — stopping "
+                    f"retries for iteration {iteration} to avoid wasted cycles[/red]"
+                )
+                converged_on_same_finding = True
+                # Fall through to the exhaustion handler below.
+
             # Handle review failure
+
             if orch.backout_on_failure:
                 # PATH A: Backout and retry
-                if attempt < max_attempts:
+                if attempt < max_attempts and not converged_on_same_finding:
                     total_retries += 1
                     counters["retries"] = total_retries
                     _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                 else:
-                    console.print(
-                        f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
+                    # #126 + #127: log convergence vs plain exhaustion, then
+                    # honor the on_retry_exhaustion policy (skip-story or abort).
+                    if converged_on_same_finding:
+                        console.print(
+                            f"  [red]✗ Iteration {iteration} converged on the same finding[/red]"
+                        )
+                    else:
+                        console.print(
+                            f"  [red]✗ All retries exhausted for iteration {iteration}[/red]"
+                        )
+                    if orch.on_retry_exhaustion == "skip-story" and target_story_id:
+                        # _skip_story writes its own progress.txt entry.
+                        _skip_story(
+                            worktree_path,
+                            target_story_id,
+                            iteration,
+                            review.findings,
+                            skipped_story_ids,
+                            pre_sha=pre_sha,
+                            restore_files=restore_files,
+                        )
+                        break  # exit attempt loop, outer loop advances
+                    console.print("  [red]Aborting iteration loop[/red]")
+                    # #83 + #103: write the failure entry before bailing so
+                    # the user has a record of what went wrong.
+                    _write_iteration_progress_entry(
+                        worktree_path,
+                        iteration,
+                        iteration_passed=False,
+                        duration_seconds=time.monotonic() - iter_start_monotonic,
+                        findings=last_findings,
                     )
                     return False
             else:
@@ -872,9 +1407,13 @@ def _run_orchestrated(
                         review.findings, worktree_path, config, stories_text
                     )
                     if fixer_result.returncode != 0:
-                        console.print(
-                            f"  [red]✗ Fixer process failed (exit {fixer_result.returncode})[/red]"
-                        )
+                        # #77: don't double-print when _run_fixer_in_sandbox
+                        # already announced the timeout above.
+                        if (fixer_result.stderr or "").strip() != "timeout":
+                            console.print(
+                                f"  [red]✗ Fixer process failed "
+                                f"(exit {fixer_result.returncode})[/red]"
+                            )
                         break
 
                     # Force-commit any uncommitted fixer changes
@@ -892,7 +1431,9 @@ def _run_orchestrated(
                             worktree_path, orch.test_commands
                         )
                         if fix_test_output:
-                            console.print(fix_test_output)
+                            # See #125: disable Rich markup parsing for raw
+                            # subprocess output.
+                            console.print(fix_test_output, markup=False, highlight=False)
                         fix_test_results = format_test_results(fix_test_output, fix_tests_ok)
                         if not fix_tests_ok:
                             console.print("  [yellow]Tests still failing after fix[/yellow]")
@@ -909,6 +1450,7 @@ def _run_orchestrated(
                         fixer_diff=fix_diff,
                         stories_under_review=stories_text,
                         test_results=fix_test_results,
+                        prior_iteration_findings=prior_iteration_findings,
                     )
                     last_findings = review.findings
                     if review.passed:
@@ -946,11 +1488,45 @@ def _run_orchestrated(
                         # action == "continue" → keep going through remaining cycles
 
                 if not iteration_passed:
+                    if orch.on_retry_exhaustion == "skip-story" and target_story_id:
+                        console.print(
+                            f"  [red]✗ Fix cycles exhausted for iteration {iteration}[/red]"
+                        )
+                        _skip_story(
+                            worktree_path,
+                            target_story_id,
+                            iteration,
+                            review.findings,
+                            skipped_story_ids,
+                            # No backout in fix-in-place mode
+                            pre_sha=None,
+                            restore_files=None,
+                        )
+                        break  # exit attempt loop, outer loop advances
                     console.print(
                         f"  [red]✗ Fix cycles exhausted for iteration {iteration} — aborting[/red]"
                     )
+                    # #83 + #103: write the failure entry before bailing.
+                    _write_iteration_progress_entry(
+                        worktree_path,
+                        iteration,
+                        iteration_passed=False,
+                        duration_seconds=time.monotonic() - iter_start_monotonic,
+                        findings=last_findings,
+                    )
                     return False
                 break  # In fix-in-place mode we don't retry the coder, only the fixer
+
+        # #102: roll up this iteration's findings (if any) into the
+        # cross-iteration history visible to the next iteration's reviewer.
+        if last_findings:
+            new_summary = summarize_findings_for_history(iteration, last_findings)
+            if new_summary:
+                prior_iteration_findings.extend(new_summary)
+                # Cap the rolling history so the prompt doesn't grow without
+                # bound across long runs.
+                if len(prior_iteration_findings) > 30:
+                    prior_iteration_findings[:] = prior_iteration_findings[-30:]
 
         # Update story status for next iteration
         prev_story_status = read_story_status(prd_json)
@@ -961,26 +1537,59 @@ def _run_orchestrated(
                     prev_story_status[sid] = True
 
         updated_completed = sum(1 for v in prev_story_status.values() if v)
-        console.print(f"  [dim]Progress: {updated_completed}/{total_stories} stories done[/dim]")
+        # #103: emit per-iteration duration so users can identify whether
+        # time is dominated by coder, reviewer, or test runs. Also include
+        # the #127 skipped-story count when any stories have been skipped.
+        iter_duration = time.monotonic() - iter_start_monotonic
+        skipped_note = f" ({len(skipped_story_ids)} skipped)" if skipped_story_ids else ""
+        console.print(
+            f"  [dim]Progress: {updated_completed}/{total_stories} stories done"
+            f"{skipped_note} (iteration took {_format_duration(iter_duration)})[/dim]"
+        )
 
         # Append to progress (skip idle iterations — the coder writes its own
         # detailed entries via the orchestrated prompt)
         if consecutive_idle == 0:
-            progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
-            progress_file.parent.mkdir(parents=True, exist_ok=True)
-            status = "passed" if iteration_passed else "failed"
-            with open(progress_file, "a") as f:
-                f.write(f"\n## Iteration {iteration} — {status}\n---\n")
+            _write_iteration_progress_entry(
+                worktree_path,
+                iteration,
+                iteration_passed=iteration_passed,
+                duration_seconds=iter_duration,
+                findings=last_findings,
+            )
 
-        # Early termination: if all stories are complete after this iteration,
+        # Early termination: if every non-skipped story is complete,
         # skip remaining iterations instead of waiting for the coder to emit
-        # a COMPLETE signal (#92).
-        if iteration_passed and prev_story_status and all(prev_story_status.values()):
-            console.print("[green]All stories complete — finishing early[/green]")
+        # a COMPLETE signal (#92 + #127). Skipped stories are considered
+        # "handled" for the purposes of loop termination — the post-run review
+        # will surface them.
+        remaining = {
+            sid: done for sid, done in prev_story_status.items() if sid not in skipped_story_ids
+        }
+        if iteration_passed and remaining and all(remaining.values()):
+            if skipped_story_ids:
+                console.print(
+                    f"[green]All non-skipped stories complete "
+                    f"({len(skipped_story_ids)} skipped: "
+                    f"{', '.join(sorted(skipped_story_ids))}) — finishing[/green]"
+                )
+            else:
+                console.print("[green]All stories complete — finishing early[/green]")
             return True
 
-    console.print(
-        f"[yellow]Reached max iterations ({config.ralph.max_iterations}) "
-        "without completion signal[/yellow]"
-    )
-    return False
+    if skipped_story_ids:
+        console.print(
+            f"[yellow]Reached max iterations ({config.ralph.max_iterations}); "
+            f"{len(skipped_story_ids)} stories skipped: "
+            f"{', '.join(sorted(skipped_story_ids))}[/yellow]"
+        )
+    else:
+        console.print(
+            f"[yellow]Reached max iterations ({config.ralph.max_iterations}) "
+            "without completion signal[/yellow]"
+        )
+    # Partial progress counts as success if anything was completed — the
+    # post-run review will then surface incomplete work. The caller only
+    # treats False as an infrastructure abort.
+    any_done = any(v for v in prev_story_status.values())
+    return any_done
