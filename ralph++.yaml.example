@@ -102,6 +102,8 @@ orchestrated:
     - "pytest"
     - "ruff check ."
   backout_on_failure: true
+  max_consecutive_infra_failures: 3 # [project] abort after N coder infra failures in a row
+                                    #           (OAuth expiry, network, timeout). 0 disables.
 
   review_prompt: >
     Review the following git diff against the requirements in {prd_file}.
@@ -120,6 +122,19 @@ orchestrated:
   # prompt_template: |
   #   You are implementing iteration {iteration}. The PRD is at {prd_file}.
   #   Previous review findings: {review_findings}
+
+# ── Non-interactive defaults ───────────────────────────────────────────
+# [user/project] How review gates behave when running unattended
+# (no TTY, RALPH_NON_INTERACTIVE=1, --non-interactive, or enabled: true).
+# on_max_cycles_* values:
+#   continue   — log a warning and proceed without reviewer approval
+#   abort      — raise MaxCyclesAbort and stop the workflow
+#   retry-once — run one more batch of cycles, then continue
+non_interactive:
+  enabled: false
+  on_max_cycles_prd: continue
+  on_max_cycles_prd_json: continue
+  on_max_cycles_post: continue
 
 # ── Lifecycle hooks ────────────────────────────────────────────────────
 # [user/project] Commands run at specific workflow stages.

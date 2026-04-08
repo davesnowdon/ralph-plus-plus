@@ -2073,3 +2073,349 @@ class TestStoryScopedReview:
 
         assert captured_stories_arg is not None
         assert "did not mark any story" in captured_stories_arg
+
+
+# ── Issue #114: circuit-breaker for consecutive infra failures ─────────
+
+
+class TestConsecutiveInfraFailureCircuitBreaker:
+    """Issue #114: abort the run after N consecutive coder infra failures."""
+
+    def test_aborts_after_threshold(self, tmp_path):
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=10,
+            max_iteration_retries=0,
+            backout_on_failure=True,
+        )
+        config.orchestrated.max_consecutive_infra_failures = 3
+        coder_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            coder_calls["n"] += 1
+            return _fake_subprocess_run(
+                returncode=1,
+                stderr='API Error: 401 {"error":"OAuth token expired"}',
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch(
+                "ralph_pp.steps.sandbox._review_iteration",
+                side_effect=AssertionError("review should not run after infra failure"),
+            ),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False
+        # Circuit breaker trips on the 3rd failure — we stop there.
+        assert coder_calls["n"] == 3, f"expected circuit-breaker at 3 calls, got {coder_calls['n']}"
+
+    def test_counter_resets_on_successful_coder(self, tmp_path):
+        """Intermittent failures should not accumulate across a successful iteration."""
+        worktree = _setup_worktree(tmp_path)
+        (worktree / "scripts" / "ralph" / "prd.json").write_text(
+            json.dumps(
+                {
+                    "userStories": [
+                        {"id": "US-001", "title": "A", "passes": False},
+                        {"id": "US-002", "title": "B", "passes": False},
+                        {"id": "US-003", "title": "C", "passes": False},
+                        {"id": "US-004", "title": "D", "passes": False},
+                    ]
+                }
+            )
+        )
+        config = _make_config(
+            tmp_path,
+            max_iterations=10,
+            max_iteration_retries=0,
+            backout_on_failure=True,
+        )
+        config.orchestrated.max_consecutive_infra_failures = 3
+        # Pattern: fail, fail, success, fail, fail — should NOT trip because of reset
+        results_iter = iter([1, 1, 0, 1, 1, 0])
+        coder_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            coder_calls["n"] += 1
+            rc = next(results_iter, 0)
+            return _fake_subprocess_run(returncode=rc, stderr="fail" if rc else "")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # Must have gotten past the second pair of failures (>= 5 calls), proving reset worked.
+        assert coder_calls["n"] >= 5, (
+            f"expected reset-after-success behavior, got {coder_calls['n']} calls"
+        )
+
+    def test_disabled_when_zero(self, tmp_path):
+        """max_consecutive_infra_failures=0 disables the breaker."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=5,
+            max_iteration_retries=0,
+            backout_on_failure=True,
+        )
+        config.orchestrated.max_consecutive_infra_failures = 0
+        coder_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            coder_calls["n"] += 1
+            return _fake_subprocess_run(returncode=1, stderr="fail")
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch(
+                "ralph_pp.steps.sandbox._review_iteration",
+                side_effect=AssertionError("review should not run"),
+            ),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # Without the breaker, all 5 iterations run.
+        assert coder_calls["n"] == 5
+
+
+# ── Issue #129: reviewer owns the passes field ─────────────────────────
+
+
+class TestEnforcePassesBaseline:
+    """Unit tests for the passes-baseline helper."""
+
+    def _write_prd(self, worktree, stories):
+        prd = worktree / "scripts" / "ralph" / "prd.json"
+        prd.write_text(
+            json.dumps({"userStories": [{"id": sid, "passes": p} for sid, p in stories]})
+        )
+        return prd
+
+    def test_reverts_unauthorized_flip(self, tmp_path):
+        from ralph_pp.steps.sandbox import enforce_passes_baseline
+
+        worktree = _setup_worktree(tmp_path)
+        prd = self._write_prd(
+            worktree,
+            [("US-001", False), ("US-002", False), ("US-003", False)],
+        )
+        # Coder flipped US-002 without reviewer approval.
+        data = json.loads(prd.read_text())
+        data["userStories"][1]["passes"] = True
+        prd.write_text(json.dumps(data))
+
+        reverted = enforce_passes_baseline(prd, {"US-001": False, "US-002": False, "US-003": False})
+        assert reverted == {"US-002"}
+        state = json.loads(prd.read_text())
+        assert all(not s["passes"] for s in state["userStories"])
+
+    def test_preserves_approved_stories(self, tmp_path):
+        from ralph_pp.steps.sandbox import enforce_passes_baseline
+
+        worktree = _setup_worktree(tmp_path)
+        prd = self._write_prd(worktree, [("US-001", False), ("US-002", False)])
+        data = json.loads(prd.read_text())
+        data["userStories"][0]["passes"] = True
+        data["userStories"][1]["passes"] = True
+        prd.write_text(json.dumps(data))
+
+        reverted = enforce_passes_baseline(
+            prd,
+            {"US-001": False, "US-002": False},
+            approved={"US-001"},
+        )
+        assert reverted == {"US-002"}
+        state = json.loads(prd.read_text())
+        assert state["userStories"][0]["passes"] is True
+        assert state["userStories"][1]["passes"] is False
+
+    def test_no_change_when_coder_respected_baseline(self, tmp_path):
+        from ralph_pp.steps.sandbox import enforce_passes_baseline
+
+        worktree = _setup_worktree(tmp_path)
+        prd = self._write_prd(worktree, [("US-001", True), ("US-002", False)])
+        before = prd.read_text()
+        reverted = enforce_passes_baseline(prd, {"US-001": True, "US-002": False})
+        assert reverted == set()
+        assert prd.read_text() == before
+
+    def test_preserves_existing_baseline_true(self, tmp_path):
+        """Previously-passed stories must stay passed even if approved is empty."""
+        from ralph_pp.steps.sandbox import enforce_passes_baseline
+
+        worktree = _setup_worktree(tmp_path)
+        prd = self._write_prd(worktree, [("US-001", True), ("US-002", False)])
+        # Coder flips US-002
+        data = json.loads(prd.read_text())
+        data["userStories"][1]["passes"] = True
+        prd.write_text(json.dumps(data))
+
+        reverted = enforce_passes_baseline(prd, {"US-001": True, "US-002": False})
+        assert reverted == {"US-002"}
+        state = json.loads(prd.read_text())
+        assert state["userStories"][0]["passes"] is True
+        assert state["userStories"][1]["passes"] is False
+
+
+class TestPassesBaselineEnforcementInOrchestrator:
+    """Integration: orchestrator must not accept coder's unauthorized passes flips."""
+
+    def test_rejection_rolls_back_unauthorized_flip(self, tmp_path):
+        """Coder flips US-002 to true, reviewer rejects → US-002 restored to false."""
+        worktree = _setup_worktree(tmp_path)
+        prd = worktree / "scripts" / "ralph" / "prd.json"
+        prd.write_text(
+            json.dumps(
+                {
+                    "userStories": [
+                        {"id": "US-001", "title": "A", "passes": False},
+                        {"id": "US-002", "title": "B", "passes": False},
+                    ]
+                }
+            )
+        )
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=0,
+            backout_on_failure=False,  # fix-in-place so we exercise the non-backout path
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            # Coder flips US-002 to true without authority
+            data = json.loads(prd.read_text())
+            for s in data["userStories"]:
+                if s["id"] == "US-002":
+                    s["passes"] = True
+            prd.write_text(json.dumps(data))
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False,
+                findings="1. severity: critical\nproblem: incomplete",
+                max_severity="critical",
+                minor_only=False,
+            )
+
+        def mock_fixer(*args, **kwargs):
+            return _fake_subprocess_run(returncode=0, stdout="fixed")
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # After the (failed) iteration, US-002 must be back to false.
+        state = json.loads(prd.read_text())
+        us002 = next(s for s in state["userStories"] if s["id"] == "US-002")
+        assert us002["passes"] is False, (
+            "Coder's unauthorized flip of US-002 must be rolled back after reviewer rejection"
+        )
+
+    def test_acceptance_keeps_only_newly_completed(self, tmp_path):
+        """After LGTM, only stories in ``newly_completed`` (diffed from baseline) remain passed.
+
+        The reviewer evaluates the diff scope, which is ``newly_completed`` — the
+        set of stories the coder flipped this iteration. Stories not touched by
+        the coder stay at their previous (baseline) value. This is the
+        structural defense for issue #129: future-state prd.json can never drift
+        from the reviewer-approved baseline.
+        """
+        worktree = _setup_worktree(tmp_path)
+        prd = worktree / "scripts" / "ralph" / "prd.json"
+        prd.write_text(
+            json.dumps(
+                {
+                    "userStories": [
+                        {"id": "US-001", "title": "A", "passes": False},
+                        {"id": "US-002", "title": "B", "passes": False},
+                    ]
+                }
+            )
+        )
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=0,
+            backout_on_failure=True,
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            # Coder flips US-001 legitimately
+            data = json.loads(prd.read_text())
+            for s in data["userStories"]:
+                if s["id"] == "US-001":
+                    s["passes"] = True
+            prd.write_text(json.dumps(data))
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        state = json.loads(prd.read_text())
+        by_id = {s["id"]: s["passes"] for s in state["userStories"]}
+        assert by_id["US-001"] is True
+        assert by_id["US-002"] is False

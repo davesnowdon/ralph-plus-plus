@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 from pathlib import Path
+from typing import Literal
 
 import click
 from rich.console import Console
 from rich.markup import escape
 
-from ..config import Config, PrdReviewConfig
+from ..config import Config, NonInteractiveConfig, OnMaxCycles, PrdReviewConfig
 from ..tools import make_tool
 from ..tools.base import parse_max_severity, severity_at_or_above
 from ._git import get_diff, get_head_sha
 from ._prompts import render_prompt
 
 console = Console()
+
+MaxCyclesAction = Literal["quit", "retry", "continue"]
 
 
 class MaxCyclesAbort(SystemExit):
@@ -26,18 +31,69 @@ class MaxCyclesAbort(SystemExit):
         super().__init__("Review aborted by user after max cycles reached")
 
 
+def is_non_interactive(non_interactive: NonInteractiveConfig | None = None) -> bool:
+    """Return True when the workflow should skip stdin prompts.
+
+    Detection order:
+      1. ``non_interactive.enabled`` config flag (explicit opt-in)
+      2. ``RALPH_NON_INTERACTIVE`` env var (any truthy value)
+      3. stdin is not a TTY (CI, cron, piped runs)
+    """
+    if non_interactive is not None and non_interactive.enabled:
+        return True
+    env = os.environ.get("RALPH_NON_INTERACTIVE", "").strip().lower()
+    if env and env not in ("0", "false", "no", ""):
+        return True
+    try:
+        return not sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        # No stdin (closed, or unusual test harness) — treat as non-interactive.
+        return True
+
+
+def _action_from_policy(policy: OnMaxCycles, retry_used: bool) -> MaxCyclesAction:
+    """Map a non-interactive policy to a concrete action.
+
+    ``retry-once`` returns ``"retry"`` the first time it is consulted for a
+    given gate, then ``"continue"`` on subsequent calls.
+    """
+    if policy == "abort":
+        return "quit"
+    if policy == "continue":
+        return "continue"
+    # retry-once
+    return "continue" if retry_used else "retry"
+
+
 def prompt_max_cycles(
     phase: str,
     max_cycles: int,
     continue_label: str = "Continue — proceed without reviewer approval",
-) -> str:
+    *,
+    non_interactive: NonInteractiveConfig | None = None,
+    policy: OnMaxCycles | None = None,
+    retry_used: bool = False,
+) -> MaxCyclesAction:
     """Prompt the user for action when max review cycles are exhausted.
 
     Returns one of: "quit", "retry", "continue".
+
+    In non-interactive mode (see :func:`is_non_interactive`) the function does
+    not read stdin. Instead it applies *policy* (from the per-gate config) and
+    logs the chosen action so unattended runs do not hang indefinitely.
     """
     console.print(
         f"\n[yellow]⚠ {phase} review: max cycles ({max_cycles}) reached without LGTM[/yellow]"
     )
+
+    if is_non_interactive(non_interactive):
+        resolved_policy: OnMaxCycles = policy or "continue"
+        action = _action_from_policy(resolved_policy, retry_used)
+        console.print(
+            f"[yellow]Non-interactive mode: applying policy '{resolved_policy}' → {action}[/yellow]"
+        )
+        return action
+
     console.print(
         "[bold]Options:[/bold]\n"
         "  [cyan]1)[/cyan] Quit — abort the workflow\n"
@@ -49,7 +105,8 @@ def prompt_max_cycles(
         type=click.Choice(["1", "2", "3"]),
         default="3",
     )
-    return {"1": "quit", "2": "retry", "3": "continue"}[choice]
+    mapping: dict[str, MaxCyclesAction] = {"1": "quit", "2": "retry", "3": "continue"}
+    return mapping[choice]
 
 
 def feature_to_slug(feature: str) -> str:
@@ -145,6 +202,7 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
     total_cycles = 0
     previous_findings: str = ""
     last_fixer_diff: str = ""
+    retry_used = False
     while True:
         for cycle in range(1, review_cfg.max_cycles + 1):
             total_cycles += 1
@@ -218,13 +276,20 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
                 )
                 last_fixer_diff = ""
 
-        action = prompt_max_cycles("PRD", review_cfg.max_cycles)
+        action = prompt_max_cycles(
+            "PRD",
+            review_cfg.max_cycles,
+            non_interactive=config.non_interactive,
+            policy=config.non_interactive.on_max_cycles_prd,
+            retry_used=retry_used,
+        )
         if action == "quit":
             raise MaxCyclesAbort
         if action == "continue":
             console.print("[yellow]Continuing without reviewer approval[/yellow]")
             return
         # action == "retry" → loop again
+        retry_used = True
         console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")
 
 
@@ -320,6 +385,7 @@ def review_prd_json_loop(
     fixer = make_tool(review_cfg.fixer, config)
 
     total_cycles = 0
+    retry_used = False
     while True:
         for cycle in range(1, review_cfg.max_cycles + 1):
             total_cycles += 1
@@ -367,10 +433,17 @@ def review_prd_json_loop(
                     f"{(fix_result.output or fix_result.stderr)[:200]}"
                 )
 
-        action = prompt_max_cycles("prd.json", review_cfg.max_cycles)
+        action = prompt_max_cycles(
+            "prd.json",
+            review_cfg.max_cycles,
+            non_interactive=config.non_interactive,
+            policy=config.non_interactive.on_max_cycles_prd_json,
+            retry_used=retry_used,
+        )
         if action == "quit":
             raise MaxCyclesAbort
         if action == "continue":
             console.print("[yellow]Continuing without prd.json reviewer approval[/yellow]")
             return
+        retry_used = True
         console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")

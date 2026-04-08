@@ -321,6 +321,43 @@ def format_stories(prd_json: Path, story_ids: set[str]) -> str:
     return "\n\n".join(parts)
 
 
+def enforce_passes_baseline(
+    prd_json: Path,
+    baseline: dict[str, bool],
+    *,
+    approved: set[str] | None = None,
+) -> set[str]:
+    """Restore ``passes`` in *prd_json* to the *baseline* for unapproved stories.
+
+    The reviewer (not the coder) owns the ``passes`` field. If the coder
+    flipped a story to ``true`` during an iteration but the reviewer has not
+    approved it, we must roll the flag back to its baseline state. This is
+    the structural defense for issue #129.
+
+    *approved* is the set of story IDs that the reviewer *has* approved this
+    iteration (typically empty at rejection time; only populated when we want
+    to preserve reviewer-approved flips). Stories in *approved* retain their
+    current ``passes`` value.
+
+    Returns the set of story IDs whose ``passes`` was rolled back.
+    """
+    approved = approved or set()
+    data = load_prd(prd_json)
+    changed: set[str] = set()
+    for story in data["userStories"]:
+        sid = story.get("id")
+        if not sid or sid in approved:
+            continue
+        current = bool(story.get("passes", False))
+        expected = baseline.get(sid, False)
+        if current != expected:
+            story["passes"] = expected
+            changed.add(sid)
+    if changed:
+        prd_json.write_text(json.dumps(data, indent=2) + "\n")
+    return changed
+
+
 def format_all_completed(prd_json: Path) -> tuple[str, list[str]]:
     """Format all completed stories and return IDs of incomplete ones.
 
@@ -612,6 +649,7 @@ def _run_orchestrated(
 
     last_findings = ""
     consecutive_idle = 0
+    consecutive_infra_failures = 0
     total_retries = 0
     prev_story_status = read_story_status(prd_json)
 
@@ -724,7 +762,27 @@ def _run_orchestrated(
                     _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                     continue
                 console.print("  [red]Infra failure — skipping review[/red]")
+                consecutive_infra_failures += 1
+                if (
+                    orch.max_consecutive_infra_failures > 0
+                    and consecutive_infra_failures >= orch.max_consecutive_infra_failures
+                ):
+                    last_error = (result.stderr or result.stdout or "unknown").strip()
+                    if len(last_error) > 200:
+                        last_error = last_error[:200] + "..."
+                    console.print(
+                        f"[red]✗ {consecutive_infra_failures} consecutive infra "
+                        f"failures — aborting (last error: {last_error})[/red]"
+                    )
+                    console.print(
+                        "[yellow]Fix the underlying issue (auth, network, tool config) "
+                        "and resume with --resume-worktree.[/yellow]"
+                    )
+                    return False
                 break
+
+            # Coder ran cleanly — reset the infra circuit-breaker counter.
+            consecutive_infra_failures = 0
 
             # Check for completion signal — verify against prd.json
             if COMPLETE_SIGNAL in combined_output:
@@ -837,6 +895,17 @@ def _run_orchestrated(
             if review.passed and not tests_failed:
                 if review.minor_only and review.max_severity is not None:
                     console.print("  [dim]Minor findings carried forward[/dim]")
+                # Reviewer owns the passes field (#129): strip any passes
+                # flips the coder made for stories the reviewer did not
+                # actually approve this iteration.
+                reverted = enforce_passes_baseline(
+                    prd_json, prev_story_status, approved=newly_completed
+                )
+                if reverted:
+                    console.print(
+                        f"  [yellow]Rolled back unauthorized passes flip for: "
+                        f"{', '.join(sorted(reverted))}[/yellow]"
+                    )
                 iteration_passed = True
                 break
             elif tests_failed and review.passed:
@@ -845,7 +914,18 @@ def _run_orchestrated(
                 )
                 last_findings = "Tests failed. " + review.findings
 
-            # Handle review failure
+            # Handle review failure.
+            # Reviewer owns the passes field (#129): before we backout or
+            # invoke the fixer, revert any passes flips the coder made this
+            # iteration. Backout mode also relies on restore_files, but
+            # enforcing the baseline here keeps fix-in-place mode safe too.
+            reverted_after_reject = enforce_passes_baseline(prd_json, prev_story_status)
+            if reverted_after_reject:
+                console.print(
+                    f"  [yellow]Rolled back unauthorized passes flip for: "
+                    f"{', '.join(sorted(reverted_after_reject))}[/yellow]"
+                )
+
             if orch.backout_on_failure:
                 # PATH A: Backout and retry
                 if attempt < max_attempts:

@@ -167,7 +167,7 @@ class TestPrdReviewLoopMaxCycles:
             patch("ralph_pp.steps.prd.make_tool") as mock_make,
             patch(
                 "ralph_pp.steps.prd.prompt_max_cycles",
-                side_effect=lambda *a: next(prompt_responses),
+                side_effect=lambda *a, **kw: next(prompt_responses),
             ),
             patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
             patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
@@ -365,24 +365,181 @@ class TestPostReviewLoopMaxCycles:
 
 
 class TestPromptMaxCycles:
+    """Interactive-path tests for ``prompt_max_cycles``.
+
+    The pytest environment has no TTY, so by default
+    :func:`is_non_interactive` returns True and the function short-circuits
+    the click prompt. Each test here patches ``is_non_interactive`` to
+    ``False`` to exercise the real stdin path.
+    """
+
     def test_choice_1_returns_quit(self):
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="1"):
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="1"),
+        ):
             assert prompt_max_cycles("PRD", 3) == "quit"
 
     def test_choice_2_returns_retry(self):
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="2"):
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="2"),
+        ):
             assert prompt_max_cycles("PRD", 3) == "retry"
 
     def test_choice_3_returns_continue(self):
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="3"):
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="3"),
+        ):
             assert prompt_max_cycles("PRD", 3) == "continue"
 
     def test_custom_continue_label(self, capsys):
-        with patch("ralph_pp.steps.prd.click.prompt", return_value="3"):
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="3"),
+        ):
             result = prompt_max_cycles(
                 "Post-run", 3, continue_label="Accept — finish without reviewer approval"
             )
         assert result == "continue"
+
+
+class TestPromptMaxCyclesNonInteractive:
+    """Non-interactive path for ``prompt_max_cycles`` — issue #128.
+
+    In unattended runs (no TTY, RALPH_NON_INTERACTIVE=1, or
+    non_interactive.enabled=True) the function must NOT read stdin.
+    """
+
+    def test_skips_stdin_and_applies_continue_policy(self):
+        # Default stdin patching: pytest has no TTY, so non-interactive path runs.
+        with patch("ralph_pp.steps.prd.click.prompt") as mock_click:
+            action = prompt_max_cycles("PRD", 3, policy="continue")
+        assert action == "continue"
+        mock_click.assert_not_called()
+
+    def test_abort_policy_returns_quit(self):
+        with patch("ralph_pp.steps.prd.click.prompt") as mock_click:
+            action = prompt_max_cycles("PRD", 3, policy="abort")
+        assert action == "quit"
+        mock_click.assert_not_called()
+
+    def test_retry_once_returns_retry_then_continue(self):
+        with patch("ralph_pp.steps.prd.click.prompt") as mock_click:
+            first = prompt_max_cycles("PRD", 3, policy="retry-once", retry_used=False)
+            second = prompt_max_cycles("PRD", 3, policy="retry-once", retry_used=True)
+        assert first == "retry"
+        assert second == "continue"
+        mock_click.assert_not_called()
+
+    def test_env_var_forces_non_interactive(self, monkeypatch):
+        from ralph_pp.steps.prd import is_non_interactive
+
+        monkeypatch.setenv("RALPH_NON_INTERACTIVE", "1")
+        # Even with a fake TTY, env var wins.
+        with patch("ralph_pp.steps.prd.sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            assert is_non_interactive() is True
+
+    def test_config_enabled_forces_non_interactive(self):
+        from ralph_pp.config import NonInteractiveConfig
+        from ralph_pp.steps.prd import is_non_interactive
+
+        with patch("ralph_pp.steps.prd.sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            assert is_non_interactive(NonInteractiveConfig(enabled=True)) is True
+
+    def test_tty_without_overrides_is_interactive(self, monkeypatch):
+        from ralph_pp.config import NonInteractiveConfig
+        from ralph_pp.steps.prd import is_non_interactive
+
+        monkeypatch.delenv("RALPH_NON_INTERACTIVE", raising=False)
+        with patch("ralph_pp.steps.prd.sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            assert is_non_interactive(NonInteractiveConfig(enabled=False)) is False
+
+    def test_prd_review_loop_continues_unattended(self, tmp_path):
+        """End-to-end: PRD review hitting max cycles under non-interactive default."""
+        config = _make_config(prd_review=_review_cfg(max_cycles=1))
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.click.prompt") as mock_click,
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            # Must return cleanly, not raise or hang.
+            review_prd_loop(prd_file, tmp_path, config)
+
+        mock_click.assert_not_called()
+
+    def test_post_review_loop_continues_unattended(self, tmp_path):
+        """End-to-end: post-run review hitting max cycles under non-interactive default."""
+        config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=1))
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.click.prompt") as mock_click,
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            result = post_review_loop(tmp_path, config)
+        assert result.outcome == "accepted"
+        mock_click.assert_not_called()
+
+    def test_prd_review_loop_aborts_when_policy_abort(self, tmp_path):
+        """Config-level abort policy should raise MaxCyclesAbort without prompting."""
+        config = _make_config(prd_review=_review_cfg(max_cycles=1))
+        config.non_interactive.on_max_cycles_prd = "abort"
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch("ralph_pp.steps.prd.click.prompt") as mock_click,
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("1. severity: major\nproblem: bad")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            with pytest.raises(MaxCyclesAbort):
+                review_prd_loop(prd_file, tmp_path, config)
+
+        mock_click.assert_not_called()
 
 
 class TestPostReviewFixer:

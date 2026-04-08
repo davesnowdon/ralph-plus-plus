@@ -207,6 +207,15 @@ _sandbox_dir_option = click.option(
     "Repeatable. When set, other stories are treated as already complete.",
 )
 @click.option(
+    "--non-interactive",
+    is_flag=True,
+    default=False,
+    help="Never prompt on stdin. When a review gate reaches max cycles without "
+    "LGTM, apply the configured non_interactive.on_max_cycles_* policy "
+    "(default: continue) instead of asking. Also honored automatically when "
+    "stdin is not a TTY or RALPH_NON_INTERACTIVE=1 is set.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -230,6 +239,7 @@ def run(
     manual_prd: bool,
     resume_worktree: Path | None,
     story_filter: tuple[str, ...],
+    non_interactive: bool,
     dry_run: bool,
 ) -> None:
     """Run the full Ralph agentic coding workflow."""
@@ -265,6 +275,8 @@ def run(
         cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
     if story_filter:
         cfg.orchestrated.story_filter = list(story_filter)
+    if non_interactive:
+        cfg.non_interactive.enabled = True
 
     orchestrator = Orchestrator(
         feature=feature, config=cfg, dry_run=dry_run, resume_worktree=resume_worktree
