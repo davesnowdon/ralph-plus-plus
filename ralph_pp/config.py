@@ -460,6 +460,15 @@ class OrchestratedConfig:
     #   "skip-story" — mark the failing story as skipped, continue the loop
     #                  so independent downstream stories still get a chance
     on_retry_exhaustion: OnRetryExhaustion = "skip-story"
+    # #126: when the reviewer rejects retry N+1 with findings that are
+    # essentially the same as retry N, the coder has converged on a wrong
+    # interpretation. Stop wasting cycles after this many consecutive
+    # same-finding rejections. 0 disables convergence detection.
+    max_same_finding_retries: int = 2
+    # #126: Jaccard similarity threshold (0.0–1.0) for "same finding"
+    # detection. Two reviewer outputs are considered the same finding when
+    # their normalized token sets overlap by at least this much.
+    same_finding_similarity_threshold: float = 0.75
     coder_timeout: int = 1800  # seconds (30 min default)
     reviewer_timeout: int = 300  # seconds (5 min default)
     fixer_timeout: int = 600  # seconds (10 min default)
@@ -791,6 +800,15 @@ def _build_config(data: dict[str, Any]) -> Config:
             on_retry_exhaustion=parse_on_retry_exhaustion(
                 o.get("on_retry_exhaustion", defaults.on_retry_exhaustion)
             ),
+            max_same_finding_retries=int(
+                o.get("max_same_finding_retries", defaults.max_same_finding_retries)
+            ),
+            same_finding_similarity_threshold=float(
+                o.get(
+                    "same_finding_similarity_threshold",
+                    defaults.same_finding_similarity_threshold,
+                )
+            ),
             coder_timeout=int(o.get("coder_timeout", defaults.coder_timeout)),
             reviewer_timeout=int(o.get("reviewer_timeout", defaults.reviewer_timeout)),
             fixer_timeout=int(o.get("fixer_timeout", defaults.fixer_timeout)),
@@ -919,6 +937,18 @@ def validate_config(cfg: Config) -> None:
         val = getattr(cfg.orchestrated, attr)
         if val < 0:
             errors.append(f"orchestrated.{attr} must be >= 0, got {val}")
+
+    if cfg.orchestrated.max_same_finding_retries < 0:
+        errors.append(
+            "orchestrated.max_same_finding_retries must be >= 0, "
+            f"got {cfg.orchestrated.max_same_finding_retries}"
+        )
+
+    sim = cfg.orchestrated.same_finding_similarity_threshold
+    if not 0.0 <= sim <= 1.0:
+        errors.append(
+            f"orchestrated.same_finding_similarity_threshold must be in [0.0, 1.0], got {sim}"
+        )
 
     if not isinstance(cfg.orchestrated.test_commands, list):
         errors.append(

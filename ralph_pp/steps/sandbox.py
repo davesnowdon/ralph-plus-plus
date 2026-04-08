@@ -11,6 +11,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -409,11 +410,79 @@ these specific issues will result in another rejection:
 
 """
 
+_RETRY_ESCALATION_HEADER = """\
+⚠ RETRY {attempt}/{max_attempts} — REPEATED FAILURE ({repeat_count}x)
+You have failed to address these specific findings {repeat_count} times
+in a row. Your current approach is not working. You MUST:
 
-def _wrap_retry_findings(findings: str, attempt: int, max_attempts: int) -> str:
-    """Prepend a structured header to findings on retry attempts."""
+  1. Re-read the relevant source files from scratch, paying attention
+     to the code paths cited in the reviewer's evidence below — not
+     just the area you have been editing.
+  2. Take a FUNDAMENTALLY different approach than your previous attempts.
+  3. If the reviewer cites a specific function, class, or code path,
+     start by reading that exact location and understanding why the
+     previous change did not satisfy the requirement.
+
+The reviewer's findings are reproduced verbatim below:
+
+"""
+
+
+# #126: token-set Jaccard similarity used to detect same-finding convergence.
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _normalize_findings(text: str) -> set[str]:
+    """Normalize reviewer output for similarity comparison.
+
+    Lowercased alphanumeric tokens only — ignores punctuation, whitespace,
+    and ordering. Short tokens (<3 chars) are dropped because they add noise
+    without carrying semantic weight.
+    """
+    if not text:
+        return set()
+    return {tok.lower() for tok in _TOKEN_RE.findall(text) if len(tok) >= 3}
+
+
+def findings_similarity(a: str, b: str) -> float:
+    """Return Jaccard similarity (0.0–1.0) between two reviewer outputs.
+
+    Returns 0.0 when either side is empty. Used to detect #126 convergence:
+    when retry N+1 cites essentially the same finding as retry N, the coder
+    has locked onto a wrong interpretation and the orchestrator should
+    escalate the prompt or stop wasting cycles.
+    """
+    tokens_a = _normalize_findings(a)
+    tokens_b = _normalize_findings(b)
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    return intersection / union if union else 0.0
+
+
+def _wrap_retry_findings(
+    findings: str,
+    attempt: int,
+    max_attempts: int,
+    repeat_count: int = 0,
+) -> str:
+    """Prepend a structured header to findings on retry attempts.
+
+    When *repeat_count* is >= 1 (meaning this is the N-th consecutive retry
+    that cites substantially the same findings) the header escalates to
+    explicitly call out the repeat pattern and demand a different approach
+    (#126).
+    """
     if attempt <= 1 or not findings:
         return findings
+    if repeat_count >= 1:
+        return (
+            _RETRY_ESCALATION_HEADER.format(
+                attempt=attempt, max_attempts=max_attempts, repeat_count=repeat_count + 1
+            )
+            + findings
+        )
     return _RETRY_HEADER.format(attempt=attempt, max_attempts=max_attempts) + findings
 
 
@@ -811,6 +880,14 @@ def _run_orchestrated(
         max_attempts = orch.max_iteration_retries + 1 if orch.backout_on_failure else 1
 
         iteration_passed = False
+        # #126: detect when consecutive retries cite essentially the same
+        # reviewer findings — that means the coder has converged on a wrong
+        # interpretation and continued retries will waste cycles without
+        # making progress.
+        prev_retry_findings = ""
+        same_finding_count = 0
+        converged_on_same_finding = False
+
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 console.print(
@@ -827,7 +904,9 @@ def _run_orchestrated(
                     iteration=str(iteration),
                     prd_file=str(prd_json),
                     progress=progress_text,
-                    review_findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
+                    review_findings=_wrap_retry_findings(
+                        last_findings, attempt, max_attempts, same_finding_count
+                    ),
                 )
                 iter_prompt = worktree_path / "scripts" / "ralph" / ".iteration-prompt.md"
                 iter_prompt.write_text(prompt_text)
@@ -839,7 +918,9 @@ def _run_orchestrated(
                 # coder knows why its previous attempt was rejected.
                 _write_coder_prompt(
                     worktree_path,
-                    findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
+                    findings=_wrap_retry_findings(
+                        last_findings, attempt, max_attempts, same_finding_count
+                    ),
                     story_filter=orch.story_filter or None,
                     skipped_story_ids=skipped_story_ids or None,
                 )
@@ -1040,17 +1121,55 @@ def _run_orchestrated(
                     f"{', '.join(sorted(reverted_after_reject))}[/yellow]"
                 )
 
+            # #126: same-finding convergence detection. Compare the current
+            # rejection's findings against the previous retry's; if they are
+            # essentially the same, bump the counter and maybe escalate /
+            # bail out.
+            if prev_retry_findings:
+                sim = findings_similarity(prev_retry_findings, review.findings)
+                if sim >= orch.same_finding_similarity_threshold:
+                    same_finding_count += 1
+                    console.print(
+                        f"  [yellow]⚠ Same finding detected {same_finding_count + 1}x "
+                        f"in a row (similarity {sim:.2f}) — coder may be converging "
+                        f"on a wrong interpretation[/yellow]"
+                    )
+                else:
+                    same_finding_count = 0
+            prev_retry_findings = review.findings
+
+            if (
+                orch.max_same_finding_retries > 0
+                and same_finding_count >= orch.max_same_finding_retries
+            ):
+                console.print(
+                    f"  [red]✗ Reviewer cited the same finding "
+                    f"{same_finding_count + 1} times in a row — stopping "
+                    f"retries for iteration {iteration} to avoid wasted cycles[/red]"
+                )
+                converged_on_same_finding = True
+                # Fall through to the exhaustion handler below.
+
+            # Handle review failure
+
             if orch.backout_on_failure:
                 # PATH A: Backout and retry
-                if attempt < max_attempts:
+                if attempt < max_attempts and not converged_on_same_finding:
                     total_retries += 1
                     counters["retries"] = total_retries
                     _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                 else:
-                    if orch.on_retry_exhaustion == "skip-story" and target_story_id:
+                    # #126 + #127: log convergence vs plain exhaustion, then
+                    # honor the on_retry_exhaustion policy (skip-story or abort).
+                    if converged_on_same_finding:
+                        console.print(
+                            f"  [red]✗ Iteration {iteration} converged on the same finding[/red]"
+                        )
+                    else:
                         console.print(
                             f"  [red]✗ All retries exhausted for iteration {iteration}[/red]"
                         )
+                    if orch.on_retry_exhaustion == "skip-story" and target_story_id:
                         _skip_story(
                             worktree_path,
                             target_story_id,
@@ -1060,10 +1179,8 @@ def _run_orchestrated(
                             pre_sha=pre_sha,
                             restore_files=restore_files,
                         )
-                        break  # exit attempt loop, outer loop advances to next iteration
-                    console.print(
-                        f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
-                    )
+                        break  # exit attempt loop, outer loop advances
+                    console.print("  [red]Aborting iteration loop[/red]")
                     return False
             else:
                 # PATH B: Invoke fixer to fix in-place
