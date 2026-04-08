@@ -596,10 +596,20 @@ def _review_iteration(
 ) -> ReviewResult:
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
-    # Apply reviewer_timeout to the tool config if not already set
+    # Apply reviewer_timeout to the tool config if not already set.
+    # Tool config wins when both are set; log the precedence so users can
+    # understand why their orchestrated.reviewer_timeout setting may
+    # appear to have no effect (#82).
     tool_cfg = config.get_tool(orch.reviewer)
     if orch.reviewer_timeout and not tool_cfg.timeout:
         tool_cfg = dataclasses.replace(tool_cfg, timeout=orch.reviewer_timeout)
+    elif orch.reviewer_timeout and tool_cfg.timeout:
+        logger.debug(
+            "orchestrated.reviewer_timeout=%d ignored; tool '%s' already has timeout=%d",
+            orch.reviewer_timeout,
+            orch.reviewer,
+            tool_cfg.timeout,
+        )
 
     # Use the tool factory to augment Bash permissions when auto_allow_test_commands
     # is enabled, matching the post_review path (#89).
