@@ -394,6 +394,50 @@ class RalphConfig:
     session_runner: str = "scripts/ralph-single-step.sh"  # session runner for orchestrated mode
 
 
+OnMaxCycles = Literal["continue", "abort", "retry-once"]
+_VALID_ON_MAX_CYCLES: set[str] = {"continue", "abort", "retry-once"}
+
+
+def parse_on_max_cycles(value: str) -> OnMaxCycles:
+    """Validate and narrow a string to an ``OnMaxCycles`` literal."""
+    if value not in _VALID_ON_MAX_CYCLES:
+        raise ValueError(
+            f"Invalid on_max_cycles: {value!r} (expected one of {_VALID_ON_MAX_CYCLES})"
+        )
+    return cast(OnMaxCycles, value)
+
+
+@dataclass
+class NonInteractiveConfig:
+    """Defaults applied when running unattended (no TTY or --non-interactive).
+
+    Each field selects the automatic action taken when a review gate reaches
+    its max cycle count without an LGTM. Values:
+
+    - ``continue``: log a warning and proceed without reviewer approval
+    - ``abort``:    raise ``MaxCyclesAbort`` to stop the workflow
+    - ``retry-once``: run one more batch of cycles, then ``continue``
+    """
+
+    enabled: bool = False  # True => force non-interactive even in a TTY
+    on_max_cycles_prd: OnMaxCycles = "continue"
+    on_max_cycles_prd_json: OnMaxCycles = "continue"
+    on_max_cycles_post: OnMaxCycles = "continue"
+
+
+OnRetryExhaustion = Literal["abort", "skip-story"]
+_VALID_ON_RETRY_EXHAUSTION: set[str] = {"abort", "skip-story"}
+
+
+def parse_on_retry_exhaustion(value: str) -> OnRetryExhaustion:
+    """Validate and narrow a string to an ``OnRetryExhaustion`` literal."""
+    if value not in _VALID_ON_RETRY_EXHAUSTION:
+        raise ValueError(
+            f"Invalid on_retry_exhaustion: {value!r} (expected one of {_VALID_ON_RETRY_EXHAUSTION})"
+        )
+    return cast(OnRetryExhaustion, value)
+
+
 @dataclass
 class OrchestratedConfig:
     coder: str = "claude"
@@ -406,6 +450,25 @@ class OrchestratedConfig:
     backout_severity_threshold: Severity = "major"
     auto_allow_test_commands: bool = True
     max_idle_iterations: int = 2
+    # Abort the run after this many consecutive coder iterations that fail
+    # with an infra/process error (OAuth expiry, network, timeout). Counter
+    # resets on any successful coder run. 0 disables the circuit-breaker.
+    max_consecutive_infra_failures: int = 3
+    # Behavior when an iteration exhausts all retries / fix cycles for a
+    # single story (#127):
+    #   "abort"      — stop the backlog and advance to post-review (legacy)
+    #   "skip-story" — mark the failing story as skipped, continue the loop
+    #                  so independent downstream stories still get a chance
+    on_retry_exhaustion: OnRetryExhaustion = "skip-story"
+    # #126: when the reviewer rejects retry N+1 with findings that are
+    # essentially the same as retry N, the coder has converged on a wrong
+    # interpretation. Stop wasting cycles after this many consecutive
+    # same-finding rejections. 0 disables convergence detection.
+    max_same_finding_retries: int = 2
+    # #126: Jaccard similarity threshold (0.0–1.0) for "same finding"
+    # detection. Two reviewer outputs are considered the same finding when
+    # their normalized token sets overlap by at least this much.
+    same_finding_similarity_threshold: float = 0.75
     coder_timeout: int = 1800  # seconds (30 min default)
     reviewer_timeout: int = 300  # seconds (5 min default)
     fixer_timeout: int = 600  # seconds (10 min default)
@@ -443,6 +506,10 @@ class Config:
 
     # Orchestrated mode
     orchestrated: OrchestratedConfig = field(default_factory=OrchestratedConfig)
+
+    # Non-interactive defaults (applied when stdin is not a TTY or when
+    # non_interactive.enabled is True / RALPH_NON_INTERACTIVE is set)
+    non_interactive: NonInteractiveConfig = field(default_factory=NonInteractiveConfig)
 
     # Hooks
     hooks: dict[str, list[str]] = field(default_factory=lambda: dict[str, list[str]]())
@@ -724,6 +791,24 @@ def _build_config(data: dict[str, Any]) -> Config:
                 defaults.auto_allow_test_commands,
             ),
             max_idle_iterations=int(o.get("max_idle_iterations", defaults.max_idle_iterations)),
+            max_consecutive_infra_failures=int(
+                o.get(
+                    "max_consecutive_infra_failures",
+                    defaults.max_consecutive_infra_failures,
+                )
+            ),
+            on_retry_exhaustion=parse_on_retry_exhaustion(
+                o.get("on_retry_exhaustion", defaults.on_retry_exhaustion)
+            ),
+            max_same_finding_retries=int(
+                o.get("max_same_finding_retries", defaults.max_same_finding_retries)
+            ),
+            same_finding_similarity_threshold=float(
+                o.get(
+                    "same_finding_similarity_threshold",
+                    defaults.same_finding_similarity_threshold,
+                )
+            ),
             coder_timeout=int(o.get("coder_timeout", defaults.coder_timeout)),
             reviewer_timeout=int(o.get("reviewer_timeout", defaults.reviewer_timeout)),
             fixer_timeout=int(o.get("fixer_timeout", defaults.fixer_timeout)),
@@ -733,6 +818,22 @@ def _build_config(data: dict[str, Any]) -> Config:
             prompt_template=o.get("prompt_template", defaults.prompt_template),
             story_filter=o.get("story_filter", defaults.story_filter),
             max_diff_chars=int(o.get("max_diff_chars", defaults.max_diff_chars)),
+        )
+
+    if "non_interactive" in data:
+        ni = data["non_interactive"]
+        ni_defaults = NonInteractiveConfig()
+        cfg.non_interactive = NonInteractiveConfig(
+            enabled=_parse_bool(ni.get("enabled", ni_defaults.enabled), ni_defaults.enabled),
+            on_max_cycles_prd=parse_on_max_cycles(
+                ni.get("on_max_cycles_prd", ni_defaults.on_max_cycles_prd)
+            ),
+            on_max_cycles_prd_json=parse_on_max_cycles(
+                ni.get("on_max_cycles_prd_json", ni_defaults.on_max_cycles_prd_json)
+            ),
+            on_max_cycles_post=parse_on_max_cycles(
+                ni.get("on_max_cycles_post", ni_defaults.on_max_cycles_post)
+            ),
         )
 
     cfg.hooks = data.get("hooks", {})
@@ -811,10 +912,43 @@ def validate_config(cfg: Config) -> None:
             f"{cfg.orchestrated.backout_severity_threshold!r} not in {_VALID_SEVERITIES}"
         )
 
+    if cfg.orchestrated.max_consecutive_infra_failures < 0:
+        errors.append(
+            "orchestrated.max_consecutive_infra_failures must be >= 0, "
+            f"got {cfg.orchestrated.max_consecutive_infra_failures}"
+        )
+
+    if cfg.orchestrated.on_retry_exhaustion not in _VALID_ON_RETRY_EXHAUSTION:
+        errors.append(
+            f"orchestrated.on_retry_exhaustion="
+            f"{cfg.orchestrated.on_retry_exhaustion!r} not in {_VALID_ON_RETRY_EXHAUSTION}"
+        )
+
+    for attr in (
+        "on_max_cycles_prd",
+        "on_max_cycles_prd_json",
+        "on_max_cycles_post",
+    ):
+        val = getattr(cfg.non_interactive, attr)
+        if val not in _VALID_ON_MAX_CYCLES:
+            errors.append(f"non_interactive.{attr}={val!r} not in {_VALID_ON_MAX_CYCLES}")
+
     for attr in ("coder_timeout", "reviewer_timeout", "fixer_timeout"):
         val = getattr(cfg.orchestrated, attr)
         if val < 0:
             errors.append(f"orchestrated.{attr} must be >= 0, got {val}")
+
+    if cfg.orchestrated.max_same_finding_retries < 0:
+        errors.append(
+            "orchestrated.max_same_finding_retries must be >= 0, "
+            f"got {cfg.orchestrated.max_same_finding_retries}"
+        )
+
+    sim = cfg.orchestrated.same_finding_similarity_threshold
+    if not 0.0 <= sim <= 1.0:
+        errors.append(
+            f"orchestrated.same_finding_similarity_threshold must be in [0.0, 1.0], got {sim}"
+        )
 
     if not isinstance(cfg.orchestrated.test_commands, list):
         errors.append(
