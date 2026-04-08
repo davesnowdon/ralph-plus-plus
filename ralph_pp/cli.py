@@ -211,6 +211,31 @@ _sandbox_dir_option = click.option(
     "Repeatable. When set, other stories are treated as already complete.",
 )
 @click.option(
+    "--design-implementation-scope",
+    type=click.Choice(["unspecified", "single_pass", "incremental"]),
+    default=None,
+    help="(#121) Design constraint: implementation scope. 'single_pass' tells "
+    "the PRD generator to avoid transitional wrappers; 'incremental' allows them.",
+)
+@click.option(
+    "--design-backward-compatibility",
+    type=click.Choice(["unspecified", "required", "not_required"]),
+    default=None,
+    help="(#121) Design constraint: must new code interoperate with data produced by old code?",
+)
+@click.option(
+    "--design-existing-tests",
+    type=click.Choice(["unspecified", "must_pass", "can_update"]),
+    default=None,
+    help="(#121) Design constraint: must existing tests pass without modification?",
+)
+@click.option(
+    "--design-api-stability",
+    type=click.Choice(["unspecified", "extend_only", "can_break"]),
+    default=None,
+    help="(#121) Design constraint: can the public API change in breaking ways?",
+)
+@click.option(
     "--non-interactive",
     is_flag=True,
     default=False,
@@ -243,6 +268,10 @@ def run(
     manual_prd: bool,
     resume_worktree: Path | None,
     story_filter: tuple[str, ...],
+    design_implementation_scope: str | None,
+    design_backward_compatibility: str | None,
+    design_existing_tests: str | None,
+    design_api_stability: str | None,
     non_interactive: bool,
     dry_run: bool,
 ) -> None:
@@ -279,6 +308,15 @@ def run(
         cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
     if story_filter:
         cfg.orchestrated.story_filter = list(story_filter)
+    # #121: CLI design-stance overrides win over config-file values.
+    if design_implementation_scope:
+        cfg.design_stance.implementation_scope = design_implementation_scope  # type: ignore[assignment]
+    if design_backward_compatibility:
+        cfg.design_stance.backward_compatibility = design_backward_compatibility  # type: ignore[assignment]
+    if design_existing_tests:
+        cfg.design_stance.existing_tests = design_existing_tests  # type: ignore[assignment]
+    if design_api_stability:
+        cfg.design_stance.api_stability = design_api_stability  # type: ignore[assignment]
     if non_interactive:
         cfg.non_interactive.enabled = True
 

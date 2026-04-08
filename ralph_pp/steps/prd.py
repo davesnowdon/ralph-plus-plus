@@ -13,7 +13,13 @@ import click
 from rich.console import Console
 from rich.markup import escape
 
-from ..config import Config, NonInteractiveConfig, OnMaxCycles, PrdReviewConfig
+from ..config import (
+    Config,
+    DesignStanceConfig,
+    NonInteractiveConfig,
+    OnMaxCycles,
+    PrdReviewConfig,
+)
 from ..tools import make_tool
 from ..tools.base import parse_max_severity, severity_at_or_above
 from ._git import get_diff, get_head_sha
@@ -118,6 +124,114 @@ def feature_to_slug(feature: str) -> str:
     return slug
 
 
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _normalize_findings(text: str) -> set[str]:
+    """Lowercased token set with short tokens dropped, used for similarity."""
+    if not text:
+        return set()
+    return {tok.lower() for tok in _TOKEN_RE.findall(text) if len(tok) >= 3}
+
+
+def findings_jaccard(a: str, b: str) -> float:
+    """Token-set Jaccard similarity. 0.0 when either is empty.
+
+    Used by the PRD review loop (#118) to detect when consecutive cycles
+    produce essentially the same findings — a signal that we've hit
+    diminishing returns and should stop iterating.
+    """
+    tokens_a = _normalize_findings(a)
+    tokens_b = _normalize_findings(b)
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+
+_CODEBASE_CONTEXT_INSTRUCTION = """\
+
+## Read the existing codebase first
+
+Before specifying contracts or acceptance criteria, read the existing
+codebase at {repo_path} to understand current types, schemas, and
+constraints. Pay particular attention to:
+- Dataclass / Protocol / Pydantic / TypedDict definitions referenced by the PRD
+- Database schema (SQL DDL, ORM models, migrations) and column constraints
+- Nullable vs non-nullable fields
+- Existing test fixtures that construct the types you're specifying
+- Public API surfaces that callers depend on
+
+Acceptance criteria you write must be satisfiable against the actual code,
+not against an idealized version of it. If a criterion would require
+changing an existing type or schema in a way that breaks callers, call
+that out explicitly in the PRD's "Constraints" or "Risks" section.
+"""
+
+
+def _build_design_stance_block(stance: DesignStanceConfig | None) -> str:
+    """Render the design-stance answers as constraints for the generator (#121).
+
+    Returns an empty string when *stance* is None or all fields are unset.
+    """
+    if stance is None:
+        return ""
+    parts: list[str] = []
+    if stance.implementation_scope == "single_pass":
+        parts.append(
+            "- This PRD covers a SINGLE implementation pass — all phases will "
+            "be implemented together. Do NOT introduce transitional wrappers, "
+            "adapters, or compatibility shims between phases. Design each phase "
+            "assuming all previous phases are already complete."
+        )
+    elif stance.implementation_scope == "incremental":
+        parts.append(
+            "- This PRD will be implemented incrementally — phases may ship "
+            "independently. Design transitional contracts that let earlier "
+            "phases run before later ones land."
+        )
+
+    if stance.backward_compatibility == "required":
+        parts.append(
+            "- Backward compatibility is REQUIRED. New code must read/write "
+            "data created by old code. Schema migrations must preserve "
+            "existing rows. Do not redesign storage in ways that strand old data."
+        )
+    elif stance.backward_compatibility == "not_required":
+        parts.append(
+            "- Backward compatibility is NOT required. Storage layouts and "
+            "data formats may be redesigned freely."
+        )
+
+    if stance.existing_tests == "must_pass":
+        parts.append(
+            "- ALL existing tests must continue to pass without modification. "
+            "Constrain contract changes to be backward-compatible with current "
+            "test expectations."
+        )
+    elif stance.existing_tests == "can_update":
+        parts.append("- Existing tests MAY be updated as part of this work.")
+
+    if stance.api_stability == "extend_only":
+        parts.append(
+            "- The public API may only EXTEND with optional parameters. "
+            "Do not change signatures of existing public functions/methods "
+            "in a breaking way."
+        )
+    elif stance.api_stability == "can_break":
+        parts.append("- The public API may be changed in breaking ways.")
+
+    if stance.notes:
+        parts.append(f"- Additional design constraints: {stance.notes}")
+
+    if not parts:
+        return ""
+    return (
+        "\n## Design constraints\n\n"
+        "Incorporate the following design-stance answers as hard constraints "
+        "throughout the PRD:\n\n" + "\n".join(parts) + "\n"
+    )
+
+
 def generate_prd(
     feature: str,
     worktree_path: Path,
@@ -125,6 +239,7 @@ def generate_prd(
     *,
     manual: bool = False,
     prd_prompt: str | None = None,
+    repo_path: Path | None = None,
 ) -> Path:
     """
     Invoke the Claude /prd skill to generate a text PRD.
@@ -136,6 +251,10 @@ def generate_prd(
     When *prd_prompt* is provided it is used as the generation prompt instead
     of the short *feature* string.  This allows a richer description while
     keeping *feature* short for branch/worktree naming.
+
+    When *repo_path* is provided (and the prompt is non-manual), a standard
+    "read the codebase first" instruction is appended so the generator
+    grounds its acceptance criteria in real types/schemas (#117).
     """
     console.print("[bold cyan]\n── Step: Generate PRD ──[/bold cyan]")
     slug = feature_to_slug(feature)
@@ -155,6 +274,12 @@ def generate_prd(
             "non-goals, and technical considerations.\n\n"
             f"Save the PRD to tasks/{prd_filename}"
         )
+        # #117: ground the generator in the actual codebase
+        codebase_target = repo_path or config.repo_path
+        if codebase_target:
+            prompt += _CODEBASE_CONTEXT_INSTRUCTION.format(repo_path=str(codebase_target))
+        # #121: inject design-stance answers as hard constraints
+        prompt += _build_design_stance_block(config.design_stance)
 
     tool_cfg = config.get_tool(config.prd_tool)
     if tool_cfg.interactive:
@@ -202,6 +327,9 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
     total_cycles = 0
     previous_findings: str = ""
     last_fixer_diff: str = ""
+    # #118: detect diminishing returns when consecutive cycles surface
+    # essentially the same findings.
+    convergence_threshold = 0.8
     retry_used = False
     while True:
         for cycle in range(1, review_cfg.max_cycles + 1):
@@ -251,6 +379,21 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
                 )
                 console.print(f"[dim]{escape(result.output or '')}[/dim]")
                 return
+
+            # #118: convergence detection. If the new findings are
+            # essentially the same as the previous cycle's, accept early —
+            # the reviewer has stopped making forward progress and further
+            # cycles will only produce marginal refinements.
+            if previous_findings:
+                similarity = findings_jaccard(previous_findings, result.output)
+                if similarity >= convergence_threshold:
+                    console.print(
+                        f"[yellow]⚠ PRD review cycle {total_cycles} produced findings "
+                        f"~{int(similarity * 100)}% similar to the previous cycle — "
+                        "accepting (diminishing returns)[/yellow]"
+                    )
+                    console.print(f"[dim]{escape(result.output or '')}[/dim]")
+                    return
 
             previous_findings = result.output
             console.print(

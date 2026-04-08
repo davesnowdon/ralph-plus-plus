@@ -132,6 +132,17 @@ orchestrated:
   #   You are implementing iteration {iteration}. The PRD is at {prd_file}.
   #   Previous review findings: {review_findings}
 
+# ── Design stance (#121) ───────────────────────────────────────────────
+# [user/project] Hard constraints injected into the PRD generation prompt
+# so the generator avoids scope-inappropriate architectural choices.
+# Each field defaults to "unspecified" — that means no constraint is added.
+design_stance:
+  implementation_scope: unspecified    # unspecified | single_pass | incremental
+  backward_compatibility: unspecified  # unspecified | required | not_required
+  existing_tests: unspecified          # unspecified | must_pass | can_update
+  api_stability: unspecified           # unspecified | extend_only | can_break
+  notes: ""                             # free-form additional constraints
+
 # ── Non-interactive defaults ───────────────────────────────────────────
 # [user/project] How review gates behave when running unattended
 # (no TTY, RALPH_NON_INTERACTIVE=1, --non-interactive, or enabled: true).
