@@ -438,6 +438,55 @@ def truncate_diff(diff: str, max_chars: int) -> str:
     )
 
 
+def summarize_findings_for_history(
+    iteration: int,
+    findings: str,
+    *,
+    max_lines: int = 3,
+) -> list[str]:
+    """Extract one-line summaries from a reviewer's findings block (#102).
+
+    The history is shown to the next iteration's reviewer, so we want
+    short, scannable lines — not the full evidence/recommendation block.
+    Picks up to *max_lines* lines per iteration.
+    """
+    if not findings or "LGTM" in findings.split("\n", 1)[0]:
+        return []
+    summary: list[str] = []
+    for raw in findings.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # Skip prose preambles; only capture lines that look like findings.
+        lower = line.lower()
+        if lower.startswith(("severity:", "problem:", "file:", "1.", "2.", "3.")):
+            # Trim long lines
+            if len(line) > 140:
+                line = line[:140] + "..."
+            summary.append(f"iter {iteration}: {line}")
+            if len(summary) >= max_lines:
+                break
+    return summary
+
+
+def _format_prior_findings_summary(prior: list[str] | None) -> str:
+    """Render prior-iteration findings as a context block for the reviewer (#102).
+
+    Returns an empty string when *prior* is empty so the placeholder
+    substitutes to nothing in the prompt.
+    """
+    if not prior:
+        return ""
+    lines = "\n".join(f"  - {entry}" for entry in prior)
+    return (
+        "\n## Prior iteration findings (this run)\n\n"
+        "Earlier iterations in this run produced these findings. Watch for\n"
+        "the same classes of bugs (e.g., contract enforcement, defensive copies,\n"
+        "edge cases) in this iteration's changes:\n\n"
+        f"{lines}\n"
+    )
+
+
 def _review_iteration(
     iteration: int,
     diff: str,
@@ -448,6 +497,7 @@ def _review_iteration(
     stories_under_review: str = "",
     test_results: str = "",
     first_review: bool = False,
+    prior_iteration_findings: list[str] | None = None,
 ) -> ReviewResult:
     """Run reviewer on the iteration diff."""
     orch = config.orchestrated
@@ -496,6 +546,7 @@ def _review_iteration(
         diff=diff,
         stories_under_review=stories_under_review,
         previous_findings=context,
+        prior_findings_summary=_format_prior_findings_summary(prior_iteration_findings),
         test_commands_guidance=_test_commands_guidance(orch),
         test_results=test_results,
     )
@@ -613,6 +664,11 @@ def _run_orchestrated(
     last_findings = ""
     consecutive_idle = 0
     total_retries = 0
+    # #102: rolling list of one-line summaries of findings raised in earlier
+    # iterations of this run, so the inline reviewer can spot recurring bug
+    # classes (defensive copies, contract enforcement, etc.) instead of
+    # treating each iteration in isolation.
+    prior_iteration_findings: list[str] = []
     prev_story_status = read_story_status(prd_json)
 
     # Apply story filter: treat non-filtered stories as already complete
@@ -831,6 +887,7 @@ def _run_orchestrated(
                 stories_under_review=stories_text,
                 test_results=test_results_text,
                 first_review=True,
+                prior_iteration_findings=prior_iteration_findings,
             )
             last_findings = review.findings
 
@@ -909,6 +966,7 @@ def _run_orchestrated(
                         fixer_diff=fix_diff,
                         stories_under_review=stories_text,
                         test_results=fix_test_results,
+                        prior_iteration_findings=prior_iteration_findings,
                     )
                     last_findings = review.findings
                     if review.passed:
@@ -951,6 +1009,17 @@ def _run_orchestrated(
                     )
                     return False
                 break  # In fix-in-place mode we don't retry the coder, only the fixer
+
+        # #102: roll up this iteration's findings (if any) into the
+        # cross-iteration history visible to the next iteration's reviewer.
+        if last_findings:
+            new_summary = summarize_findings_for_history(iteration, last_findings)
+            if new_summary:
+                prior_iteration_findings.extend(new_summary)
+                # Cap the rolling history so the prompt doesn't grow without
+                # bound across long runs.
+                if len(prior_iteration_findings) > 30:
+                    prior_iteration_findings[:] = prior_iteration_findings[-30:]
 
         # Update story status for next iteration
         prev_story_status = read_story_status(prd_json)

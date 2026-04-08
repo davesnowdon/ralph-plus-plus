@@ -212,7 +212,7 @@ Do NOT evaluate against stories that are not listed here.
 ## Stories under review
 
 {stories_under_review}
-
+{prior_findings_summary}
 ## Git diff
 
 {diff}
@@ -221,6 +221,10 @@ You may inspect the changed files and nearby code as needed.
 
 Check for:
 - requirement mismatches against the acceptance criteria above
+- contract / invariant enforcement (not just "looks correct" — verify
+  the code actually enforces the constraints implied by the criteria;
+  e.g., if a criterion says "X must be UTC", the code must validate
+  this on input, not just when reading back)
 - broken or incomplete behavior
 - regressions
 - missing edge-case handling
@@ -238,6 +242,18 @@ For each finding include:
 - problem: what is wrong, risky, or incomplete
 - evidence: what in the diff or code supports the finding
 - recommended fix: the smallest reasonable corrective action
+
+## Severity discipline
+
+When a finding represents a design tradeoff (e.g., a pragmatic workaround
+with a theoretical edge case, rather than a concrete bug), rate it as
+**minor**. Reserve major / critical for findings where:
+- A test would fail on realistic input
+- A contract is violated in a way that affects callers
+- Data loss or corruption could occur in production use
+
+If you are unsure whether a finding is a bug or a design tradeoff,
+state both interpretations and rate based on the more charitable one.
 
 Only report findings that materially affect correctness, completeness, or reliability.
 {test_commands_guidance}
@@ -275,7 +291,7 @@ Do NOT evaluate against stories that are not listed here.
 ## Stories under review
 
 {stories_under_review}
-
+{prior_findings_summary}
 ## Feasibility pre-check
 
 Before reviewing the diff, check whether each acceptance criterion above
@@ -293,6 +309,10 @@ You may inspect the changed files and nearby code as needed.
 
 Check for:
 - requirement mismatches against the acceptance criteria above
+- contract / invariant enforcement (not just "looks correct" — verify
+  the code actually enforces the constraints implied by the criteria;
+  e.g., if a criterion says "X must be UTC", the code must validate
+  this on input, not just when reading back)
 - broken or incomplete behavior
 - regressions
 - missing edge-case handling
@@ -310,6 +330,18 @@ For each finding include:
 - problem: what is wrong, risky, or incomplete
 - evidence: what in the diff or code supports the finding
 - recommended fix: the smallest reasonable corrective action
+
+## Severity discipline
+
+When a finding represents a design tradeoff (e.g., a pragmatic workaround
+with a theoretical edge case, rather than a concrete bug), rate it as
+**minor**. Reserve major / critical for findings where:
+- A test would fail on realistic input
+- A contract is violated in a way that affects callers
+- Data loss or corruption could occur in production use
+
+If you are unsure whether a finding is a bug or a design tradeoff,
+state both interpretations and rate based on the more charitable one.
 
 Only report findings that materially affect correctness, completeness, or reliability.
 {test_commands_guidance}
