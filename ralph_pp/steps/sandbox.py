@@ -989,6 +989,14 @@ def _run_orchestrated(
                 else:
                     relevant = story_status
                 if all(relevant.values()):
+                    # #124: emit one final Progress line so the stream shows
+                    # N/N before handing off to the post-run review. Without
+                    # this, readers see the last in-loop count (e.g. 10/11)
+                    # and only learn the full count from the final banner.
+                    done_count = sum(1 for v in story_status.values() if v)
+                    console.print(
+                        f"  [dim]Progress: {done_count}/{total_stories} stories done[/dim]"
+                    )
                     console.print("[green]Ralph signaled COMPLETE[/green]")
                     return True
                 incomplete = [sid for sid, p in relevant.items() if not p]
