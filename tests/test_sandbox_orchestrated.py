@@ -3306,3 +3306,156 @@ class TestReviewerTimeoutPrecedenceLogging:
             _review_iteration(1, "diff", worktree, config)
 
         assert not any("ignored" in r.message for r in caplog.records)
+
+
+# ── Issue #125: subprocess output with brackets must not crash Rich ────
+
+
+class TestSubprocessOutputMarkupSafe:
+    """Issue #125: raw subprocess output containing [path/to/file.py] style
+    text must not crash Rich's markup parser."""
+
+    def test_coder_output_with_brackets_does_not_crash(self, tmp_path):
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=0)
+
+        # Output contains a closing bracket that looks like a tag — this is
+        # the exact pattern that crashed Run 1 of the 2026-04-07
+        # memory-unification-v4 run.
+        bracket_output = (
+            "Found 3 issues in [/home/dns/src/ralph_pp/sqlite_memory_store.py]:\n"
+            "  [WARN] Unused import\n"
+            "  [/CLOSED] mismatched tag\n"
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout=bracket_output)
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            # Should NOT raise rich.errors.MarkupError
+            _run_orchestrated(worktree, config)
+
+    def test_test_output_with_brackets_does_not_crash(self, tmp_path):
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=0,
+            run_tests=True,
+            test_commands=["pytest"],
+        )
+
+        bracket_output = (
+            "FAILED tests/test_foo.py::test_bar[case-1]\n"
+            "  AssertionError at [/home/dns/src/foo.py:42]\n"
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_run_tests(*args, **kwargs):
+            return (True, bracket_output)
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch(
+                "ralph_pp.steps.sandbox.run_test_commands_with_output",
+                side_effect=mock_run_tests,
+            ),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            # Should NOT raise rich.errors.MarkupError
+            _run_orchestrated(worktree, config)
+
+    def test_fix_test_output_with_brackets_does_not_crash(self, tmp_path):
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=1,
+            backout_on_failure=False,
+            run_tests=True,
+            test_commands=["pytest"],
+        )
+
+        bracket_output = "FAILED [tests/test_x.py::test_y]\n"
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="output")
+
+        def mock_run_tests(*args, **kwargs):
+            return (False, bracket_output)  # tests fail to drive fixer path
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False, findings="bad", max_severity="major", minor_only=False
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch(
+                "ralph_pp.steps.sandbox.run_test_commands_with_output",
+                side_effect=mock_run_tests,
+            ),
+            patch(
+                "ralph_pp.steps.sandbox._run_fixer_in_sandbox",
+                return_value=_fake_subprocess_run(returncode=0),
+            ),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            # Should NOT raise rich.errors.MarkupError
+            _run_orchestrated(worktree, config)
+
+
+class TestHooksMarkupSafe:
+    def test_user_command_with_brackets_does_not_crash(self, tmp_path):
+        """User-configured shell commands with brackets must not crash hooks."""
+        from ralph_pp.hooks import run_hooks
+
+        with patch("ralph_pp.hooks.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            # Should NOT raise rich.errors.MarkupError when echoing the command
+            run_hooks(
+                "post_worktree_create",
+                {"post_worktree_create": ["pytest -k 'test_foo[case-1]'"]},
+                tmp_path,
+            )

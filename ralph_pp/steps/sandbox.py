@@ -1007,7 +1007,11 @@ def _run_orchestrated(
 
             combined_output = (result.stdout or "") + (result.stderr or "")
             if combined_output:
-                console.print(combined_output)
+                # Raw subprocess output may contain bracketed text that Rich
+                # will try to parse as markup — disable both markup parsing
+                # and syntax highlighting so paths like [foo/bar.py] render
+                # verbatim. See #122/#123/#125.
+                console.print(combined_output, markup=False, highlight=False)
 
             # Check for infra/sandbox failure
             if result.returncode != 0:
@@ -1121,7 +1125,9 @@ def _run_orchestrated(
                     worktree_path, orch.test_commands
                 )
                 if test_output:
-                    console.print(test_output)
+                    # Test runner output frequently contains bracketed paths
+                    # (e.g. pytest file references). Render verbatim (#125).
+                    console.print(test_output, markup=False, highlight=False)
                 test_results_text = format_test_results(test_output, tests_ok)
                 if not tests_ok:
                     console.print("  [yellow]Tests failed — treating as review failure[/yellow]")
@@ -1284,7 +1290,9 @@ def _run_orchestrated(
                             worktree_path, orch.test_commands
                         )
                         if fix_test_output:
-                            console.print(fix_test_output)
+                            # See #125: disable Rich markup parsing for raw
+                            # subprocess output.
+                            console.print(fix_test_output, markup=False, highlight=False)
                         fix_test_results = format_test_results(fix_test_output, fix_tests_ok)
                         if not fix_tests_ok:
                             console.print("  [yellow]Tests still failing after fix[/yellow]")

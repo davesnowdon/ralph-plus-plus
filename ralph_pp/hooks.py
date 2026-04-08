@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 
 console = Console()
 
@@ -16,9 +17,11 @@ def run_hooks(hook_name: str, hooks: dict[str, list[str]], cwd: Path) -> None:
     if not commands:
         return
 
-    console.print(f"[bold cyan]→ hooks:[/bold cyan] {hook_name}")
+    console.print(f"[bold cyan]→ hooks:[/bold cyan] {escape(hook_name)}")
     for cmd in commands:
-        console.print(f"  [dim]$ {cmd}[/dim]")
+        # User-configured shell commands may contain brackets (e.g.
+        # `pytest -k 'test_x[1]'`) that Rich would parse as markup. #125
+        console.print(f"  [dim]$ {escape(cmd)}[/dim]")
         result = subprocess.run(
             cmd,
             shell=True,

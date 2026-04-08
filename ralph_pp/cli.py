@@ -8,6 +8,7 @@ from typing import Any
 
 import click
 from rich.console import Console
+from rich.markup import escape
 
 from .config import (
     discover_config_files,
@@ -60,7 +61,7 @@ def _resolve_config(
         config_paths = discover_config_files(repo_path=repo)
 
     for cp in config_paths:
-        console.print(f"[dim]Using config: {cp}[/dim]")
+        console.print(f"[dim]Using config: {escape(str(cp))}[/dim]")
 
     return config_paths, repo
 
@@ -375,7 +376,7 @@ def worktrees_list(repo: Path | None) -> None:
         return
 
     for path, branch in entries:
-        console.print(f"  {branch}  →  {path}")
+        console.print(f"  {escape(branch)}  →  {escape(path)}")
     console.print(f"\n[dim]{len(entries)} worktree(s)[/dim]")
 
 
@@ -395,7 +396,7 @@ def worktrees_clean(repo: Path | None, force: bool) -> None:
     removed = 0
     failed = 0
     for path, branch in entries:
-        console.print(f"[yellow]Removing:[/yellow] {path} ({branch})")
+        console.print(f"[yellow]Removing:[/yellow] {escape(path)} ({escape(branch)})")
         force_flag = ["--force"] if force else []
         wt_result = subprocess.run(
             ["git", "worktree", "remove", *force_flag, path],
@@ -407,7 +408,8 @@ def worktrees_clean(repo: Path | None, force: bool) -> None:
         if wt_result.returncode != 0:
             failed += 1
             msg = wt_result.stderr.strip() or f"exit code {wt_result.returncode}"
-            console.print(f"[red]  ✗ Failed to remove worktree: {msg}[/red]")
+            # Git stderr can contain bracketed text — escape it for Rich (#125).
+            console.print(f"[red]  ✗ Failed to remove worktree: {escape(msg)}[/red]")
             continue
         subprocess.run(
             ["git", "branch", "-D", branch],
