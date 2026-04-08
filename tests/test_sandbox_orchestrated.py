@@ -1412,6 +1412,23 @@ class TestRetryPromptWrapping:
         assert result.endswith(findings)
         assert "RETRY 3/4" in result
 
+    def test_repeat_count_escalates_header(self):
+        """When repeat_count >= 1, retry header must escalate the language (#126)."""
+        result = _wrap_retry_findings("problem: broken", 3, 4, repeat_count=1)
+        assert "REPEATED FAILURE" in result
+        assert "FUNDAMENTALLY different" in result
+        assert "problem: broken" in result
+
+    def test_escalation_includes_repeat_count(self):
+        result = _wrap_retry_findings("problem: broken", 4, 6, repeat_count=2)
+        assert "REPEATED FAILURE (3x)" in result  # repeat_count+1 displayed
+
+    def test_repeat_count_zero_uses_normal_header(self):
+        """repeat_count=0 keeps the original polite retry header."""
+        result = _wrap_retry_findings("problem", 2, 3, repeat_count=0)
+        assert "RETRY 2/3" in result
+        assert "REPEATED FAILURE" not in result
+
     def test_backout_retry_prompt_contains_header(self, tmp_path):
         """Integration: .iteration-prompt.md contains RETRY header on attempt 2."""
         worktree = _setup_worktree(tmp_path)
@@ -2844,3 +2861,298 @@ class TestSkipAndAdvance:
         progress = (worktree / "scripts" / "ralph" / "progress.txt").read_text()
         assert "US-001 SKIPPED" in progress
         assert "US-002 SKIPPED" in progress
+
+
+# ── Issue #126: same-finding convergence detection ─────────────────────
+
+
+class TestFindingsSimilarity:
+    """Unit tests for the ``findings_similarity`` helper."""
+
+    def test_identical_returns_one(self):
+        from ralph_pp.steps.sandbox import findings_similarity
+
+        assert findings_similarity("foo bar baz", "foo bar baz") == 1.0
+
+    def test_disjoint_returns_zero(self):
+        from ralph_pp.steps.sandbox import findings_similarity
+
+        assert findings_similarity("alpha beta gamma", "delta epsilon zeta") == 0.0
+
+    def test_empty_inputs_return_zero(self):
+        from ralph_pp.steps.sandbox import findings_similarity
+
+        assert findings_similarity("", "anything") == 0.0
+        assert findings_similarity("anything", "") == 0.0
+
+    def test_case_insensitive(self):
+        from ralph_pp.steps.sandbox import findings_similarity
+
+        assert findings_similarity("Foo Bar", "foo bar") == 1.0
+
+    def test_ignores_punctuation_and_ordering(self):
+        from ralph_pp.steps.sandbox import findings_similarity
+
+        assert findings_similarity("foo, bar: baz!", "baz bar foo") == 1.0
+
+    def test_short_tokens_filtered(self):
+        """Tokens <3 chars are dropped to reduce noise."""
+        from ralph_pp.steps.sandbox import findings_similarity
+
+        # "is" and "a" are filtered — only "problem" matches
+        sim = findings_similarity("is a problem", "a problem is")
+        assert sim == 1.0
+
+    def test_partial_overlap_returns_jaccard(self):
+        from ralph_pp.steps.sandbox import findings_similarity
+
+        # {"alpha", "beta"} vs {"beta", "gamma"} → 1/3
+        sim = findings_similarity("alpha beta", "beta gamma")
+        assert abs(sim - (1 / 3)) < 1e-9
+
+    def test_verbatim_repeat_scores_high(self):
+        """Realistic #126 case: reviewer produces essentially the same block.
+
+        The observed bug was that the reviewer produced verbatim-same
+        findings across retries (the coder kept making cosmetic edits that
+        didn't change what the reviewer saw). Against verbatim input the
+        Jaccard score should be well above the default threshold (0.75).
+        """
+        from ralph_pp.steps.sandbox import findings_similarity
+
+        a = (
+            "1. severity: critical\nfile: ralph_pp/agent.py\n"
+            "problem: Agent.__init__ does not wire MemoryFacade\n"
+            "evidence: line 42 imports MemoryFacade but never instantiates it"
+        )
+        # Simulate the coder making a cosmetic change that doesn't address
+        # the finding: reviewer repeats the same block with trivial edits.
+        b = (
+            "1. severity: critical\nfile: ralph_pp/agent.py\n"
+            "problem: Agent.__init__ still does not wire MemoryFacade\n"
+            "evidence: line 42 imports MemoryFacade but never instantiates it"
+        )
+        assert findings_similarity(a, b) >= 0.75
+
+    def test_rephrased_same_issue_has_meaningful_overlap(self):
+        """Different phrasing of the same issue should show non-trivial overlap
+        even if it does not cross the default threshold."""
+        from ralph_pp.steps.sandbox import findings_similarity
+
+        a = (
+            "1. severity: critical\nfile: ralph_pp/agent.py\n"
+            "problem: Agent.__init__ does not wire MemoryFacade\n"
+        )
+        b = (
+            "CRITICAL: ralph_pp/agent.py still missing MemoryFacade wiring.\n"
+            "At Agent.__init__ the MemoryFacade is never instantiated."
+        )
+        sim = findings_similarity(a, b)
+        assert sim > 0.25, f"expected meaningful overlap, got {sim}"
+
+
+class TestSameFindingConvergence:
+    """Integration: same-finding convergence should abort the retry loop."""
+
+    def test_backout_mode_aborts_on_same_finding_convergence(self, tmp_path):
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=5,  # would normally allow 6 attempts
+            backout_on_failure=True,
+        )
+        config.orchestrated.max_same_finding_retries = 2  # stop after 2 repeats
+        coder_calls = {"n": 0}
+
+        # Reviewer always returns the same findings
+        same_findings = (
+            "1. severity: critical\nfile: ralph_pp/agent.py\n"
+            "problem: Agent.__init__ does not wire MemoryFacade\n"
+            "evidence: line 42 imports MemoryFacade but never instantiates it"
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            coder_calls["n"] += 1
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False,
+                findings=same_findings,
+                max_severity="critical",
+                minor_only=False,
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False
+        # Initial attempt + 2 retries that each triggered a same-finding
+        # rejection → 3 total coder calls, then abort. Without the
+        # convergence detection this would have run all 6 attempts.
+        assert coder_calls["n"] == 3, (
+            f"Expected convergence detection to stop at 3 calls, got {coder_calls['n']}"
+        )
+
+    def test_disabled_when_zero(self, tmp_path):
+        """max_same_finding_retries=0 disables convergence detection."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=2,
+            backout_on_failure=True,
+        )
+        config.orchestrated.max_same_finding_retries = 0
+        coder_calls = {"n": 0}
+        same_findings = "problem: broken"
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            coder_calls["n"] += 1
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False, findings=same_findings, max_severity="major", minor_only=False
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # All 3 attempts should run (initial + 2 retries) because
+        # convergence detection is disabled.
+        assert coder_calls["n"] == 3
+
+    def test_differing_findings_do_not_trip_breaker(self, tmp_path):
+        """When findings change between retries, convergence detection stays quiet."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=2,
+            backout_on_failure=True,
+        )
+        config.orchestrated.max_same_finding_retries = 2
+        coder_calls = {"n": 0}
+
+        # Each retry gets different findings (different files, different problems)
+        findings_seq = iter(
+            [
+                "problem: foo.py line 10 missing import",
+                "problem: bar.py line 42 wrong type annotation",
+                "problem: baz.py line 7 unused variable",
+            ]
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            coder_calls["n"] += 1
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False,
+                findings=next(findings_seq, "done"),
+                max_severity="major",
+                minor_only=False,
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # All 3 attempts should run because findings are different each time.
+        assert coder_calls["n"] == 3
+
+    def test_escalation_header_injected_on_repeat(self, tmp_path):
+        """When the retry prompt is regenerated for a repeat, it uses the escalation header."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=3,
+            backout_on_failure=True,
+        )
+        config.orchestrated.prompt_template = (
+            "iter {iteration} prd {prd_file} progress {progress} findings {review_findings}"
+        )
+        config.orchestrated.max_same_finding_retries = 10  # don't abort early
+        same_findings = "problem: broken specific thing at line 42"
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False, findings=same_findings, max_severity="major", minor_only=False
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # After the 3rd attempt's prompt write, the iteration-prompt file
+        # should contain the escalation header.
+        iter_prompt = worktree / "scripts" / "ralph" / ".iteration-prompt.md"
+        assert iter_prompt.exists()
+        content = iter_prompt.read_text()
+        assert "REPEATED FAILURE" in content
+        assert "FUNDAMENTALLY different" in content
