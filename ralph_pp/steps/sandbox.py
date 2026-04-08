@@ -11,6 +11,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,7 +160,13 @@ def run_sandbox(worktree_path: Path, config: Config) -> RunSummary:
         finally:
             _save_counters(worktree_path, counters["iterations"], counters["retries"])
     else:
-        success = _run_delegated(worktree_path, config)
+        # #109: delegated mode runs the sandbox's internal Ralph loop, so
+        # ralph++ has to scrape its stdout to count iterations for the
+        # final summary banner.
+        try:
+            success = _run_delegated(worktree_path, config, counters)
+        finally:
+            _save_counters(worktree_path, counters["iterations"], counters["retries"])
 
     # Build summary from post-run state
     prd_json = worktree_path / "scripts" / "ralph" / "prd.json"
@@ -352,8 +359,28 @@ def _wrap_retry_findings(findings: str, attempt: int, max_attempts: int) -> str:
 # ── Delegated mode ─────────────────────────────────────────────────────
 
 
-def _run_delegated(worktree_path: Path, config: Config) -> bool:
-    """Mode 1: Invoke ralph-sandbox with its built-in Ralph loop."""
+# #109: Match lines like "Ralph Iteration 8 of 30 (claude)" emitted by the
+# sandbox's built-in loop. Tolerant to surrounding box characters.
+_DELEGATED_ITERATION_RE = re.compile(
+    r"Ralph\s+Iteration\s+(\d+)\s+of\s+(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _run_delegated(
+    worktree_path: Path,
+    config: Config,
+    counters: dict[str, int] | None = None,
+) -> bool:
+    """Mode 1: Invoke ralph-sandbox with its built-in Ralph loop.
+
+    Tees the sandbox's stdout to the terminal so the user still sees the
+    live stream, while parsing for ``Ralph Iteration N of M`` lines so
+    ``counters['iterations']`` reflects the actual sandbox iteration count
+    in the final summary banner (#109).
+    """
+    if counters is None:
+        counters = {"iterations": 0, "retries": 0}
     console.print("[bold cyan]\n── Delegated mode ──[/bold cyan]")
 
     cmd = _build_sandbox_command(
@@ -364,14 +391,37 @@ def _run_delegated(worktree_path: Path, config: Config) -> bool:
     )
 
     console.print("[dim]$ " + " ".join(cmd[:5]) + " ...[/dim]")
-    result = subprocess.run(cmd, text=True)
 
-    if result.returncode == 0:
+    # Stream stdout line-by-line so we can both forward to the user AND
+    # parse for iteration progress lines.
+    proc = subprocess.Popen(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            # Forward verbatim — disable Rich markup parsing because the
+            # subprocess line may contain bracketed text (#125).
+            console.print(line.rstrip("\n"), markup=False, highlight=False)
+            match = _DELEGATED_ITERATION_RE.search(line)
+            if match:
+                try:
+                    counters["iterations"] = int(match.group(1))
+                except ValueError:
+                    pass
+    finally:
+        proc.wait()
+
+    returncode = proc.returncode
+    if returncode == 0:
         console.print("[green]✓ Ralph completed successfully[/green]")
         return True
-    else:
-        console.print(f"[red]✗ Ralph exited with code {result.returncode}[/red]")
-        return False
+    console.print(f"[red]✗ Ralph exited with code {returncode}[/red]")
+    return False
 
 
 # ── Orchestrated mode ──────────────────────────────────────────────────
