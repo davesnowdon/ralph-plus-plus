@@ -358,6 +358,37 @@ def enforce_passes_baseline(
     return changed
 
 
+def next_target_story(
+    prd_json: Path,
+    excluded_ids: set[str] | None = None,
+    story_filter: set[str] | None = None,
+) -> str | None:
+    """Return the story ID the coder is expected to pick next, or ``None``.
+
+    Mirrors the orchestrated coder prompt rule: "highest priority story where
+    ``passes`` is ``false``". Stories in *excluded_ids* (skipped after
+    retry exhaustion) and those outside *story_filter* are ignored.
+    """
+    excluded = excluded_ids or set()
+    data = load_prd(prd_json)
+    candidates: list[dict[str, Any]] = []
+    for story in data["userStories"]:
+        sid = story.get("id")
+        if not sid or sid in excluded:
+            continue
+        if story_filter is not None and sid not in story_filter:
+            continue
+        if story.get("passes", False):
+            continue
+        candidates.append(story)
+    if not candidates:
+        return None
+    # Stable order: by priority (lower is higher priority, per the
+    # orchestrated-mode prompt convention), then by id for determinism.
+    candidates.sort(key=lambda s: (int(s.get("priority", 999)), str(s.get("id", ""))))
+    return str(candidates[0].get("id"))
+
+
 def format_all_completed(prd_json: Path) -> tuple[str, list[str]]:
     """Format all completed stories and return IDs of incomplete ones.
 
@@ -418,19 +449,27 @@ def _write_coder_prompt(
     worktree_path: Path,
     findings: str = "",
     story_filter: list[str] | None = None,
+    skipped_story_ids: set[str] | None = None,
 ) -> None:
     """Write the orchestrated coder prompt, optionally with review findings."""
     ralph_dir = worktree_path / "scripts" / "ralph"
     ralph_dir.mkdir(parents=True, exist_ok=True)
 
+    parts: list[str] = []
     if story_filter:
         ids = ", ".join(story_filter)
-        filter_instruction = (
+        parts.append(
             f"\n   **IMPORTANT: Only work on these story IDs: {ids}. "
             "Skip all other stories even if they have `passes` set to `false`.**"
         )
-    else:
-        filter_instruction = ""
+    if skipped_story_ids:
+        skipped = ", ".join(sorted(skipped_story_ids))
+        parts.append(
+            f"\n   **IMPORTANT: Do NOT work on these story IDs (they have been "
+            f"skipped after exhausting retries): {skipped}. "
+            "Pick the next highest-priority unfinished story instead.**"
+        )
+    filter_instruction = "".join(parts)
 
     prompt = _ORCHESTRATED_CODER_PROMPT.replace("{story_filter_instruction}", filter_instruction)
     if findings:
@@ -617,6 +656,48 @@ def _merge_env(extra: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def _skip_story(
+    worktree_path: Path,
+    story_id: str,
+    iteration: int,
+    findings: str,
+    skipped_story_ids: set[str],
+    *,
+    pre_sha: str | None = None,
+    restore_files: dict[Path, str] | None = None,
+) -> None:
+    """Record a retry-exhaustion skip and (in backout mode) reset the worktree.
+
+    - Adds *story_id* to *skipped_story_ids* so future iterations exclude it.
+    - Appends a failure entry to ``scripts/ralph/progress.txt`` with truncated
+      reviewer findings so the post-run review (#127) and humans can see why.
+    - When *pre_sha* is provided, hard-resets the worktree to that SHA and
+      restores *restore_files*, matching the backout path (#127). In
+      fix-in-place mode the caller passes ``pre_sha=None`` so any partial
+      fix-cycle commits are left in place; they can still be rolled back by
+      the post-run review if needed.
+    """
+    skipped_story_ids.add(story_id)
+    console.print(
+        f"  [yellow]Skipping {story_id} after retry exhaustion — advancing to next story[/yellow]"
+    )
+
+    progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+    progress_file.parent.mkdir(parents=True, exist_ok=True)
+    trimmed_findings = (findings or "").strip()
+    if len(trimmed_findings) > 1500:
+        trimmed_findings = trimmed_findings[:1500] + "\n... (truncated)"
+    with open(progress_file, "a") as f:
+        f.write(
+            f"\n## Iteration {iteration} — {story_id} SKIPPED (retry exhaustion)\n"
+            f"Reason: all retries/fix cycles exhausted without reviewer LGTM.\n"
+            f"Last reviewer findings:\n{trimmed_findings or '(none)'}\n---\n"
+        )
+
+    if pre_sha is not None:
+        _backout_to(worktree_path, pre_sha, restore_files=restore_files)
+
+
 def _save_counters(worktree_path: Path, iterations: int, retries: int) -> None:
     """Persist iteration/retry counters for RunSummary."""
     counters = worktree_path / "scripts" / "ralph" / ".run-counters"
@@ -651,6 +732,9 @@ def _run_orchestrated(
     consecutive_idle = 0
     consecutive_infra_failures = 0
     total_retries = 0
+    # #127: stories that exhausted their retry budget. Excluded from future
+    # iterations so independent downstream work can still make progress.
+    skipped_story_ids: set[str] = set()
     prev_story_status = read_story_status(prd_json)
 
     # Apply story filter: treat non-filtered stories as already complete
@@ -681,6 +765,35 @@ def _run_orchestrated(
         console.print(
             f"\n[bold]═══ Iteration {iteration}/{config.ralph.max_iterations} "
             f"({completed}/{total_stories} stories done) ═══[/bold]"
+        )
+
+        # #127: Compute the story the coder is expected to pick this
+        # iteration, so that on retry exhaustion we can mark *that* story
+        # as skipped rather than guessing. Also lets us exit early when
+        # every remaining story has been skipped.
+        target_story_id = next_target_story(
+            prd_json,
+            excluded_ids=skipped_story_ids,
+            story_filter=filter_set,
+        )
+        if target_story_id is None and skipped_story_ids:
+            # We ran out of targets *because* stories were skipped. Exit so
+            # the post-run review can surface them. Empty prd.json and
+            # already-done states are handled by the existing completion
+            # checks at the bottom of the loop.
+            console.print(
+                f"[yellow]All remaining stories have been skipped "
+                f"({', '.join(sorted(skipped_story_ids))}) — finishing "
+                "iteration loop[/yellow]"
+            )
+            break
+
+        # Refresh CLAUDE.md with the latest skip list so the coder excludes
+        # stories that previously exhausted their retry budget.
+        _write_coder_prompt(
+            worktree_path,
+            story_filter=orch.story_filter or None,
+            skipped_story_ids=skipped_story_ids or None,
         )
 
         pre_sha = get_head_sha(worktree_path)
@@ -728,6 +841,7 @@ def _run_orchestrated(
                     worktree_path,
                     findings=_wrap_retry_findings(last_findings, attempt, max_attempts),
                     story_filter=orch.story_filter or None,
+                    skipped_story_ids=skipped_story_ids or None,
                 )
 
             # Run coder in sandbox
@@ -933,6 +1047,20 @@ def _run_orchestrated(
                     counters["retries"] = total_retries
                     _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                 else:
+                    if orch.on_retry_exhaustion == "skip-story" and target_story_id:
+                        console.print(
+                            f"  [red]✗ All retries exhausted for iteration {iteration}[/red]"
+                        )
+                        _skip_story(
+                            worktree_path,
+                            target_story_id,
+                            iteration,
+                            review.findings,
+                            skipped_story_ids,
+                            pre_sha=pre_sha,
+                            restore_files=restore_files,
+                        )
+                        break  # exit attempt loop, outer loop advances to next iteration
                     console.print(
                         f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
                     )
@@ -1026,6 +1154,21 @@ def _run_orchestrated(
                         # action == "continue" → keep going through remaining cycles
 
                 if not iteration_passed:
+                    if orch.on_retry_exhaustion == "skip-story" and target_story_id:
+                        console.print(
+                            f"  [red]✗ Fix cycles exhausted for iteration {iteration}[/red]"
+                        )
+                        _skip_story(
+                            worktree_path,
+                            target_story_id,
+                            iteration,
+                            review.findings,
+                            skipped_story_ids,
+                            # No backout in fix-in-place mode
+                            pre_sha=None,
+                            restore_files=None,
+                        )
+                        break  # exit attempt loop, outer loop advances
                     console.print(
                         f"  [red]✗ Fix cycles exhausted for iteration {iteration} — aborting[/red]"
                     )
@@ -1041,7 +1184,10 @@ def _run_orchestrated(
                     prev_story_status[sid] = True
 
         updated_completed = sum(1 for v in prev_story_status.values() if v)
-        console.print(f"  [dim]Progress: {updated_completed}/{total_stories} stories done[/dim]")
+        skipped_note = f" ({len(skipped_story_ids)} skipped)" if skipped_story_ids else ""
+        console.print(
+            f"  [dim]Progress: {updated_completed}/{total_stories} stories done{skipped_note}[/dim]"
+        )
 
         # Append to progress (skip idle iterations — the coder writes its own
         # detailed entries via the orchestrated prompt)
@@ -1052,15 +1198,38 @@ def _run_orchestrated(
             with open(progress_file, "a") as f:
                 f.write(f"\n## Iteration {iteration} — {status}\n---\n")
 
-        # Early termination: if all stories are complete after this iteration,
+        # Early termination: if every non-skipped story is complete,
         # skip remaining iterations instead of waiting for the coder to emit
-        # a COMPLETE signal (#92).
-        if iteration_passed and prev_story_status and all(prev_story_status.values()):
-            console.print("[green]All stories complete — finishing early[/green]")
+        # a COMPLETE signal (#92 + #127). Skipped stories are considered
+        # "handled" for the purposes of loop termination — the post-run review
+        # will surface them.
+        remaining = {
+            sid: done for sid, done in prev_story_status.items() if sid not in skipped_story_ids
+        }
+        if iteration_passed and remaining and all(remaining.values()):
+            if skipped_story_ids:
+                console.print(
+                    f"[green]All non-skipped stories complete "
+                    f"({len(skipped_story_ids)} skipped: "
+                    f"{', '.join(sorted(skipped_story_ids))}) — finishing[/green]"
+                )
+            else:
+                console.print("[green]All stories complete — finishing early[/green]")
             return True
 
-    console.print(
-        f"[yellow]Reached max iterations ({config.ralph.max_iterations}) "
-        "without completion signal[/yellow]"
-    )
-    return False
+    if skipped_story_ids:
+        console.print(
+            f"[yellow]Reached max iterations ({config.ralph.max_iterations}); "
+            f"{len(skipped_story_ids)} stories skipped: "
+            f"{', '.join(sorted(skipped_story_ids))}[/yellow]"
+        )
+    else:
+        console.print(
+            f"[yellow]Reached max iterations ({config.ralph.max_iterations}) "
+            "without completion signal[/yellow]"
+        )
+    # Partial progress counts as success if anything was completed — the
+    # post-run review will then surface incomplete work. The caller only
+    # treats False as an infrastructure abort.
+    any_done = any(v for v in prev_story_status.values())
+    return any_done

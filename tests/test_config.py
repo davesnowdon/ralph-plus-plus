@@ -784,3 +784,22 @@ def test_non_interactive_invalid_policy_rejected(tmp_path):
     config_file.write_text(yaml.dump({"non_interactive": {"on_max_cycles_prd": "bogus"}}))
     with pytest.raises(ValueError, match="on_max_cycles"):
         load_config(config_file)
+
+
+def test_on_retry_exhaustion_default():
+    cfg = load_config(None)
+    assert cfg.orchestrated.on_retry_exhaustion == "skip-story"
+
+
+def test_on_retry_exhaustion_from_yaml(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"orchestrated": {"on_retry_exhaustion": "abort"}}))
+    cfg = load_config(config_file)
+    assert cfg.orchestrated.on_retry_exhaustion == "abort"
+
+
+def test_on_retry_exhaustion_invalid_rejected(tmp_path):
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"orchestrated": {"on_retry_exhaustion": "bogus"}}))
+    with pytest.raises(ValueError, match="on_retry_exhaustion"):
+        load_config(config_file)

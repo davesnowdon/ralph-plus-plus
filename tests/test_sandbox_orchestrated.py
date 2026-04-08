@@ -25,8 +25,15 @@ def _make_config(
     backout_severity_threshold: str = "major",
     run_tests: bool = False,
     test_commands: list[str] | None = None,
+    on_retry_exhaustion: str = "abort",
 ) -> Config:
-    """Build a Config with fake sandbox dir and orchestrated settings."""
+    """Build a Config with fake sandbox dir and orchestrated settings.
+
+    Note: the production default for ``on_retry_exhaustion`` is
+    ``"skip-story"`` (see #127). Tests default to ``"abort"`` for
+    backwards compatibility with pre-#127 assertions; tests that exercise
+    the skip path pass ``on_retry_exhaustion="skip-story"`` explicitly.
+    """
     sandbox_dir = tmp_path / "ralph-sandbox"
     (sandbox_dir / "bin").mkdir(parents=True)
     wrapper = sandbox_dir / "bin" / "ralph-sandbox"
@@ -65,6 +72,7 @@ def _make_config(
             backout_severity_threshold=backout_severity_threshold,
             run_tests_between_steps=run_tests,
             test_commands=test_commands or [],
+            on_retry_exhaustion=on_retry_exhaustion,  # type: ignore[arg-type]
         ),
     )
 
@@ -2419,3 +2427,420 @@ class TestPassesBaselineEnforcementInOrchestrator:
         by_id = {s["id"]: s["passes"] for s in state["userStories"]}
         assert by_id["US-001"] is True
         assert by_id["US-002"] is False
+
+
+# ── Issue #127: skip-and-advance on retry exhaustion ───────────────────
+
+
+class TestNextTargetStory:
+    """Unit tests for the ``next_target_story`` helper."""
+
+    def _make_prd(self, tmp_path, stories):
+        prd = tmp_path / "prd.json"
+        prd.write_text(json.dumps({"userStories": stories}))
+        return prd
+
+    def test_returns_highest_priority_unfinished(self, tmp_path):
+        from ralph_pp.steps.sandbox import next_target_story
+
+        prd = self._make_prd(
+            tmp_path,
+            [
+                {"id": "US-001", "passes": True, "priority": 1},
+                {"id": "US-002", "passes": False, "priority": 3},
+                {"id": "US-003", "passes": False, "priority": 2},
+            ],
+        )
+        assert next_target_story(prd) == "US-003"
+
+    def test_excludes_skipped_ids(self, tmp_path):
+        from ralph_pp.steps.sandbox import next_target_story
+
+        prd = self._make_prd(
+            tmp_path,
+            [
+                {"id": "US-001", "passes": False, "priority": 1},
+                {"id": "US-002", "passes": False, "priority": 2},
+            ],
+        )
+        assert next_target_story(prd, excluded_ids={"US-001"}) == "US-002"
+
+    def test_returns_none_when_all_done(self, tmp_path):
+        from ralph_pp.steps.sandbox import next_target_story
+
+        prd = self._make_prd(
+            tmp_path,
+            [
+                {"id": "US-001", "passes": True, "priority": 1},
+                {"id": "US-002", "passes": True, "priority": 2},
+            ],
+        )
+        assert next_target_story(prd) is None
+
+    def test_returns_none_when_all_skipped(self, tmp_path):
+        from ralph_pp.steps.sandbox import next_target_story
+
+        prd = self._make_prd(
+            tmp_path,
+            [
+                {"id": "US-001", "passes": False, "priority": 1},
+                {"id": "US-002", "passes": False, "priority": 2},
+            ],
+        )
+        assert next_target_story(prd, excluded_ids={"US-001", "US-002"}) is None
+
+    def test_honors_story_filter(self, tmp_path):
+        from ralph_pp.steps.sandbox import next_target_story
+
+        prd = self._make_prd(
+            tmp_path,
+            [
+                {"id": "US-001", "passes": False, "priority": 1},
+                {"id": "US-002", "passes": False, "priority": 2},
+                {"id": "US-003", "passes": False, "priority": 3},
+            ],
+        )
+        assert next_target_story(prd, story_filter={"US-002", "US-003"}) == "US-002"
+
+    def test_missing_priority_sorts_last(self, tmp_path):
+        from ralph_pp.steps.sandbox import next_target_story
+
+        prd = self._make_prd(
+            tmp_path,
+            [
+                {"id": "US-001", "passes": False},
+                {"id": "US-002", "passes": False, "priority": 5},
+            ],
+        )
+        assert next_target_story(prd) == "US-002"
+
+
+class TestSkipAndAdvance:
+    """Integration tests for the skip-story retry-exhaustion policy (#127)."""
+
+    def _make_prd(self, worktree, stories):
+        prd = worktree / "scripts" / "ralph" / "prd.json"
+        prd.write_text(json.dumps({"userStories": stories}))
+        return prd
+
+    def _parse_skipped_from_claude_md(self, worktree):
+        """Return the set of story IDs CLAUDE.md currently tells the coder to skip."""
+        import re
+
+        claude_md = worktree / "scripts" / "ralph" / "CLAUDE.md"
+        if not claude_md.exists():
+            return set()
+        text = claude_md.read_text()
+        m = re.search(
+            r"Do NOT work on these story IDs \(they have been skipped "
+            r"after exhausting retries\): ([A-Z0-9,\- ]+)\.",
+            text,
+        )
+        if not m:
+            return set()
+        return {s.strip() for s in m.group(1).split(",") if s.strip()}
+
+    def test_skip_advances_to_next_story(self, tmp_path):
+        """When US-001 exhausts retries, orchestrator should start US-002 on next iteration."""
+        worktree = _setup_worktree(tmp_path)
+        prd = self._make_prd(
+            worktree,
+            [
+                {"id": "US-001", "title": "A", "priority": 1, "passes": False},
+                {"id": "US-002", "title": "B", "priority": 2, "passes": False},
+            ],
+        )
+        config = _make_config(
+            tmp_path,
+            max_iterations=4,
+            max_iteration_retries=1,
+            backout_on_failure=True,
+            on_retry_exhaustion="skip-story",
+        )
+        iteration_seen: list[int] = []
+        review_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            # Coder honors the skip list in CLAUDE.md when choosing a story
+            skipped = self._parse_skipped_from_claude_md(worktree)
+            data = json.loads(prd.read_text())
+            for s in data["userStories"]:
+                if not s["passes"] and s["id"] not in skipped:
+                    s["passes"] = True
+                    break
+            prd.write_text(json.dumps(data))
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(iteration, *args, **kwargs):
+            iteration_seen.append(iteration)
+            review_calls["n"] += 1
+            # US-001 gets rejected both times → exhaust → skip
+            # US-002 gets accepted the first time → pass
+            data = json.loads(prd.read_text())
+            us001 = next(s for s in data["userStories"] if s["id"] == "US-001")
+            if us001["passes"]:
+                return ReviewResult(
+                    passed=False,
+                    findings="major flaws",
+                    max_severity="major",
+                    minor_only=False,
+                )
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        # Should have completed (partial success) and visited iteration 2 for US-002
+        assert result is True
+        assert 2 in iteration_seen, (
+            f"Expected iteration 2 to run after US-001 skip; saw {iteration_seen}"
+        )
+
+        # progress.txt should record US-001 as skipped
+        progress = (worktree / "scripts" / "ralph" / "progress.txt").read_text()
+        assert "US-001 SKIPPED" in progress
+
+    def test_skip_injects_exclusion_into_claude_md(self, tmp_path):
+        """Second iteration's CLAUDE.md should tell the coder to skip US-001."""
+        worktree = _setup_worktree(tmp_path)
+        self._make_prd(
+            worktree,
+            [
+                {"id": "US-001", "title": "A", "priority": 1, "passes": False},
+                {"id": "US-002", "title": "B", "priority": 2, "passes": False},
+            ],
+        )
+        config = _make_config(
+            tmp_path,
+            max_iterations=3,
+            max_iteration_retries=1,
+            backout_on_failure=True,
+            on_retry_exhaustion="skip-story",
+        )
+        claude_md_snapshots: list[str] = []
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            # Snapshot CLAUDE.md at the moment of each coder invocation
+            claude_md = worktree / "scripts" / "ralph" / "CLAUDE.md"
+            claude_md_snapshots.append(claude_md.read_text() if claude_md.exists() else "")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False, findings="fail", max_severity="critical", minor_only=False
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        # After the first iteration skipped US-001, subsequent iterations
+        # must tell the coder not to touch it.
+        # Iteration 1 took 2 attempts (initial + 1 retry), so index 2 is iteration 2's prompt.
+        assert len(claude_md_snapshots) >= 3
+        later_snapshot = claude_md_snapshots[2]
+        assert "US-001" in later_snapshot
+        assert "skipped after exhausting retries" in later_snapshot
+
+    def test_abort_policy_still_aborts(self, tmp_path):
+        """When on_retry_exhaustion='abort', legacy behavior: return False, no advance."""
+        worktree = _setup_worktree(tmp_path)
+        self._make_prd(
+            worktree,
+            [
+                {"id": "US-001", "title": "A", "priority": 1, "passes": False},
+                {"id": "US-002", "title": "B", "priority": 2, "passes": False},
+            ],
+        )
+        config = _make_config(
+            tmp_path,
+            max_iterations=3,
+            max_iteration_retries=1,
+            backout_on_failure=True,
+            on_retry_exhaustion="abort",
+        )
+        iteration_seen: list[int] = []
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(iteration, *args, **kwargs):
+            iteration_seen.append(iteration)
+            return ReviewResult(
+                passed=False, findings="fail", max_severity="critical", minor_only=False
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is False
+        # Only iteration 1 should run — no advance after abort
+        assert iteration_seen == [1, 1]  # 2 reviews in iteration 1 (initial + 1 retry)
+
+    def test_fix_in_place_mode_skip_advances(self, tmp_path):
+        """Skip-story also works in fix-in-place mode.
+
+        Note: this test asserts the interaction between #127 (skip-and-advance)
+        and #129 (passes baseline enforcement). The coder mock honors the skip
+        list, and the reviewer rejects iteration 1 outright (driving exhaustion
+        and skip), then accepts iteration 2.
+        """
+        worktree = _setup_worktree(tmp_path)
+        prd = self._make_prd(
+            worktree,
+            [
+                {"id": "US-001", "title": "A", "priority": 1, "passes": False},
+                {"id": "US-002", "title": "B", "priority": 2, "passes": False},
+            ],
+        )
+        config = _make_config(
+            tmp_path,
+            max_iterations=4,
+            max_iteration_retries=1,
+            backout_on_failure=False,
+            on_retry_exhaustion="skip-story",
+        )
+        iteration_seen: list[int] = []
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            env = kwargs.get("env") or {}
+            is_fixer = "RALPH_PROMPT_FILE" in env and ".fix-prompt.md" in env.get(
+                "RALPH_PROMPT_FILE", ""
+            )
+            if is_fixer:
+                return _fake_subprocess_run(returncode=0, stdout="fixer output")
+            skipped = self._parse_skipped_from_claude_md(worktree)
+            data = json.loads(prd.read_text())
+            for s in data["userStories"]:
+                if not s["passes"] and s["id"] not in skipped:
+                    s["passes"] = True
+                    break
+            prd.write_text(json.dumps(data))
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(iteration, *args, **kwargs):
+            iteration_seen.append(iteration)
+            # Iteration 1: reject everything to drive exhaustion → skip US-001.
+            # Iteration 2+: accept (US-002 progresses).
+            if iteration == 1:
+                return ReviewResult(
+                    passed=False, findings="fail", max_severity="major", minor_only=False
+                )
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        assert result is True
+        assert 2 in iteration_seen
+
+        progress = (worktree / "scripts" / "ralph" / "progress.txt").read_text()
+        assert "US-001 SKIPPED" in progress
+
+    def test_exits_when_all_stories_skipped(self, tmp_path):
+        """Loop terminates cleanly when every story has been skipped."""
+        worktree = _setup_worktree(tmp_path)
+        self._make_prd(
+            worktree,
+            [
+                {"id": "US-001", "title": "A", "priority": 1, "passes": False},
+                {"id": "US-002", "title": "B", "priority": 2, "passes": False},
+            ],
+        )
+        config = _make_config(
+            tmp_path,
+            max_iterations=10,
+            max_iteration_retries=1,
+            backout_on_failure=True,
+            on_retry_exhaustion="skip-story",
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "reset" in cmd:
+                return _fake_subprocess_run(returncode=0)
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False, findings="fail", max_severity="critical", minor_only=False
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            result = _run_orchestrated(worktree, config)
+
+        # No stories were actually completed — return value depends on any_done
+        # which is False when no story got flipped. That's the correct signal.
+        assert result is False
+        progress = (worktree / "scripts" / "ralph" / "progress.txt").read_text()
+        assert "US-001 SKIPPED" in progress
+        assert "US-002 SKIPPED" in progress
