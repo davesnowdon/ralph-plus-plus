@@ -564,6 +564,81 @@ class TestPostReviewDiff:
         assert "diff --git a/foo b/foo" in prompt
         assert "all changes since run start" in prompt
 
+    def test_incremental_diff_on_subsequent_cycles(self, tmp_path):
+        """#94: cycle 2+ should NOT include the full diff, only the fixer's
+        incremental diff via the previous_findings context block."""
+        from ralph_pp.config import OrchestratedConfig
+
+        config = _make_config(
+            post_review=PostReviewConfig(
+                reviewer="codex",
+                fixer="claude",
+                max_cycles=3,
+            ),
+        )
+        config.orchestrated = OrchestratedConfig()
+
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+        base_sha_file = tmp_path / "scripts" / "ralph" / ".base-sha"
+        base_sha_file.write_text("abc1234")
+
+        full_diff_str = "diff --git a/foo b/foo\n+the full original diff\n" * 50
+        fixer_diff_str = "diff --git a/foo b/foo\n+small fix\n"
+        prompts_seen: list[str] = []
+
+        # First get_diff call returns the full diff; subsequent calls
+        # return the fixer's incremental diff.
+        diff_calls = {"n": 0}
+
+        def fake_get_diff(*args, **kwargs):
+            diff_calls["n"] += 1
+            return full_diff_str if diff_calls["n"] == 1 else fixer_diff_str
+
+        returns = [
+            _ok_result("1. severity: major\nproblem: thing-a"),
+            _ok_result("1. severity: major\nproblem: thing-b"),
+            _ok_result("LGTM"),
+        ]
+
+        def reviewer_run(prompt, cwd):
+            prompts_seen.append(prompt)
+            return returns.pop(0)
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="def5678"),
+            patch("ralph_pp.steps.post_review.get_diff", side_effect=fake_get_diff),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.side_effect = reviewer_run
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            post_review_loop(tmp_path, config)
+
+        assert len(prompts_seen) == 3, f"expected 3 reviewer calls, got {len(prompts_seen)}"
+
+        # Cycle 1 includes the full diff
+        assert "the full original diff" in prompts_seen[0]
+        assert "all changes since run start" in prompts_seen[0]
+
+        # Cycle 2+ omits the full diff
+        assert "the full original diff" not in prompts_seen[1], (
+            "cycle 2 must NOT include the full diff (#94)"
+        )
+        assert "the full original diff" not in prompts_seen[2]
+        # ...but includes the fixer's incremental diff via the context block
+        assert "small fix" in prompts_seen[1]
+        # ...and the previous findings
+        assert "thing-a" in prompts_seen[1]
+        # ...and the explicit "omitted" marker
+        assert "omitted on this cycle" in prompts_seen[1]
+
     def test_no_diff_when_base_sha_missing(self, tmp_path):
         from ralph_pp.config import OrchestratedConfig
 
