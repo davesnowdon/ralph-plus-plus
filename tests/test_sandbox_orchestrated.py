@@ -2073,3 +2073,188 @@ class TestStoryScopedReview:
 
         assert captured_stories_arg is not None
         assert "did not mark any story" in captured_stories_arg
+
+
+# ── Issue #103: per-iteration timing ───────────────────────────────────
+
+
+class TestPerIterationTiming:
+    def test_format_duration(self):
+        from ralph_pp.steps.sandbox import _format_duration
+
+        assert _format_duration(0) == "0m 00s"
+        assert _format_duration(30) == "0m 30s"
+        assert _format_duration(75) == "1m 15s"
+        assert _format_duration(3725) == "1h 2m 5s"
+        assert _format_duration(-5) == "0m 00s"
+
+    def test_iteration_banner_includes_start_time(self, tmp_path, capsys):
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=0)
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(passed=True, findings="LGTM", max_severity=None, minor_only=True)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        captured = capsys.readouterr()
+        assert "Iteration 1/1" in captured.out
+        assert "started" in captured.out
+        assert "iteration took" in captured.out
+
+    def test_progress_txt_includes_duration_and_failure_reason(self, tmp_path):
+        """#103 + #83: progress.txt records duration and failure reason."""
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=0,
+            backout_on_failure=False,
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            return _fake_subprocess_run(returncode=0, stdout="coder output")
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False,
+                findings="1. severity: major\nproblem: missing UTC validation on input",
+                max_severity="major",
+                minor_only=False,
+            )
+
+        def mock_fixer(*args, **kwargs):
+            return _fake_subprocess_run(returncode=0)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox._run_fixer_in_sandbox", side_effect=mock_fixer),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        progress = (worktree / "scripts" / "ralph" / "progress.txt").read_text()
+        assert "Iteration 1 — failed" in progress
+        assert "duration" in progress
+        # Failure context line included (#83)
+        assert "Reason:" in progress
+        assert "missing UTC validation on input" in progress
+
+    def test_summarize_findings_for_progress(self):
+        from ralph_pp.steps.sandbox import _summarize_findings_for_progress
+
+        assert _summarize_findings_for_progress("") == ""
+        # Picks the first 'problem:' line
+        assert (
+            _summarize_findings_for_progress("severity: major\nproblem: thing broken\nfile: x")
+            == "thing broken"
+        )
+        # Falls back to first line
+        assert _summarize_findings_for_progress("\n\nfirst line\nsecond line") == "first line"
+        # Truncates long output
+        long = "x" * 500
+        result = _summarize_findings_for_progress(long, max_chars=100)
+        assert len(result) <= 103
+        assert result.endswith("...")
+
+
+# ── Issue #77: no double-message on coder/fixer timeout ────────────────
+
+
+class TestNoDoubleMessageOnTimeout:
+    def test_coder_timeout_does_not_double_print(self, tmp_path, capsys):
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(tmp_path, max_iterations=1, max_iteration_retries=0)
+        config.orchestrated.coder_timeout = 1
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            raise subprocess.TimeoutExpired(cmd, timeout=1)
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        captured = capsys.readouterr()
+        assert "Coder timed out after 1s" in captured.out
+        assert "Coder process failed" not in captured.out
+
+    def test_fixer_timeout_does_not_double_print(self, tmp_path, capsys):
+        worktree = _setup_worktree(tmp_path)
+        config = _make_config(
+            tmp_path,
+            max_iterations=1,
+            max_iteration_retries=1,
+            backout_on_failure=False,
+        )
+        config.orchestrated.fixer_timeout = 1
+
+        coder_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="abc1234")
+            if isinstance(cmd, list) and "diff" in cmd:
+                return _fake_subprocess_run(returncode=0, stdout="some diff")
+            coder_calls["n"] += 1
+            if coder_calls["n"] == 1:
+                return _fake_subprocess_run(returncode=0, stdout="coder output")
+            raise subprocess.TimeoutExpired(cmd, timeout=1)
+
+        def mock_review(*args, **kwargs):
+            return ReviewResult(
+                passed=False, findings="bad", max_severity="major", minor_only=False
+            )
+
+        with (
+            patch("ralph_pp.steps.sandbox.subprocess.run", side_effect=mock_subprocess_run),
+            patch("ralph_pp.steps.sandbox._review_iteration", side_effect=mock_review),
+            patch("ralph_pp.steps.sandbox.commit_if_dirty", return_value=False),
+            patch("ralph_pp.steps.sandbox.get_head_sha", side_effect=_incrementing_sha()),
+            patch(
+                "ralph_pp.steps.sandbox._session_runner_path",
+                return_value=tmp_path / "scripts" / "ralph-single-step.sh",
+            ),
+        ):
+            _run_orchestrated(worktree, config)
+
+        captured = capsys.readouterr()
+        assert "Fixer timed out after 1s" in captured.out
+        assert "Fixer process failed" not in captured.out

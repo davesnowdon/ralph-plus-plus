@@ -12,7 +12,9 @@ import json
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -580,6 +582,64 @@ def _merge_env(extra: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def _format_duration(seconds: float) -> str:
+    """Format a wall-clock duration in seconds as 'Xm YYs' (#103)."""
+    seconds = max(0.0, float(seconds))
+    minutes, secs = divmod(int(round(seconds)), 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m {secs}s"
+    return f"{minutes}m {secs:02d}s"
+
+
+def _write_iteration_progress_entry(
+    worktree_path: Path,
+    iteration: int,
+    iteration_passed: bool,
+    duration_seconds: float,
+    findings: str,
+) -> None:
+    """Append a per-iteration entry to ``scripts/ralph/progress.txt``.
+
+    Includes duration (#103) and a one-line failure reason for failed
+    iterations (#83).
+    """
+    progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
+    progress_file.parent.mkdir(parents=True, exist_ok=True)
+    status = "passed" if iteration_passed else "failed"
+    failure_summary = ""
+    if not iteration_passed and findings:
+        summary = _summarize_findings_for_progress(findings)
+        if summary:
+            failure_summary = f"Reason: {summary}\n"
+    with open(progress_file, "a") as f:
+        f.write(
+            f"\n## Iteration {iteration} — {status} "
+            f"(duration {_format_duration(duration_seconds)})\n"
+            f"{failure_summary}---\n"
+        )
+
+
+def _summarize_findings_for_progress(findings: str, max_chars: int = 240) -> str:
+    """Extract a one-line failure summary from reviewer findings (#83).
+
+    Picks the first finding's problem line if present, otherwise the first
+    non-empty line. Trimmed to *max_chars* with an ellipsis.
+    """
+    if not findings:
+        return ""
+    lines = [line.strip() for line in findings.splitlines() if line.strip()]
+    # Prefer a 'problem:' line if any
+    for line in lines:
+        if line.lower().startswith("problem:"):
+            text = line[len("problem:") :].strip()
+            return text[:max_chars] + ("..." if len(text) > max_chars else "")
+    if lines:
+        text = lines[0]
+        return text[:max_chars] + ("..." if len(text) > max_chars else "")
+    return ""
+
+
 def _save_counters(worktree_path: Path, iterations: int, retries: int) -> None:
     """Persist iteration/retry counters for RunSummary."""
     counters = worktree_path / "scripts" / "ralph" / ".run-counters"
@@ -640,9 +700,14 @@ def _run_orchestrated(
 
         counters["iterations"] = iteration
         completed = sum(1 for v in prev_story_status.values() if v)
+        # #103: per-iteration timing — record start wallclock and start
+        # monotonic so we can emit a duration at the end of the iteration.
+        iter_start_monotonic = time.monotonic()
+        iter_start_wall = datetime.now(UTC).astimezone()
         console.print(
             f"\n[bold]═══ Iteration {iteration}/{config.ralph.max_iterations} "
-            f"({completed}/{total_stories} stories done) ═══[/bold]"
+            f"({completed}/{total_stories} stories done) "
+            f"started {iter_start_wall.strftime('%H:%M:%S')} ═══[/bold]"
         )
 
         pre_sha = get_head_sha(worktree_path)
@@ -701,6 +766,7 @@ def _run_orchestrated(
                 ralph_args=["1"],
             )
             console.print(f"  [dim]Running coder ({orch.coder})...[/dim]")
+            coder_timed_out = False
             try:
                 result = subprocess.run(
                     cmd,
@@ -712,6 +778,7 @@ def _run_orchestrated(
             except subprocess.TimeoutExpired:
                 console.print(f"  [red]✗ Coder timed out after {orch.coder_timeout}s[/red]")
                 result = subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="timeout")
+                coder_timed_out = True
 
             combined_output = (result.stdout or "") + (result.stderr or "")
             if combined_output:
@@ -719,7 +786,10 @@ def _run_orchestrated(
 
             # Check for infra/sandbox failure
             if result.returncode != 0:
-                console.print(f"  [red]✗ Coder process failed (exit {result.returncode})[/red]")
+                # #77: skip the generic failure message when we already
+                # printed a more specific timeout message just above.
+                if not coder_timed_out:
+                    console.print(f"  [red]✗ Coder process failed (exit {result.returncode})[/red]")
                 if orch.backout_on_failure and attempt < max_attempts:
                     _backout_to(worktree_path, pre_sha, restore_files=restore_files)
                     continue
@@ -856,6 +926,15 @@ def _run_orchestrated(
                     console.print(
                         f"  [red]✗ All retries exhausted for iteration {iteration} — aborting[/red]"
                     )
+                    # #83 + #103: write the failure entry before bailing so
+                    # the user has a record of what went wrong.
+                    _write_iteration_progress_entry(
+                        worktree_path,
+                        iteration,
+                        iteration_passed=False,
+                        duration_seconds=time.monotonic() - iter_start_monotonic,
+                        findings=last_findings,
+                    )
                     return False
             else:
                 # PATH B: Invoke fixer to fix in-place
@@ -872,9 +951,13 @@ def _run_orchestrated(
                         review.findings, worktree_path, config, stories_text
                     )
                     if fixer_result.returncode != 0:
-                        console.print(
-                            f"  [red]✗ Fixer process failed (exit {fixer_result.returncode})[/red]"
-                        )
+                        # #77: don't double-print when _run_fixer_in_sandbox
+                        # already announced the timeout above.
+                        if (fixer_result.stderr or "").strip() != "timeout":
+                            console.print(
+                                f"  [red]✗ Fixer process failed "
+                                f"(exit {fixer_result.returncode})[/red]"
+                            )
                         break
 
                     # Force-commit any uncommitted fixer changes
@@ -949,6 +1032,14 @@ def _run_orchestrated(
                     console.print(
                         f"  [red]✗ Fix cycles exhausted for iteration {iteration} — aborting[/red]"
                     )
+                    # #83 + #103: write the failure entry before bailing.
+                    _write_iteration_progress_entry(
+                        worktree_path,
+                        iteration,
+                        iteration_passed=False,
+                        duration_seconds=time.monotonic() - iter_start_monotonic,
+                        findings=last_findings,
+                    )
                     return False
                 break  # In fix-in-place mode we don't retry the coder, only the fixer
 
@@ -961,16 +1052,24 @@ def _run_orchestrated(
                     prev_story_status[sid] = True
 
         updated_completed = sum(1 for v in prev_story_status.values() if v)
-        console.print(f"  [dim]Progress: {updated_completed}/{total_stories} stories done[/dim]")
+        # #103: emit per-iteration duration so users can identify whether
+        # time is dominated by coder, reviewer, or test runs.
+        iter_duration = time.monotonic() - iter_start_monotonic
+        console.print(
+            f"  [dim]Progress: {updated_completed}/{total_stories} stories done "
+            f"(iteration took {_format_duration(iter_duration)})[/dim]"
+        )
 
         # Append to progress (skip idle iterations — the coder writes its own
         # detailed entries via the orchestrated prompt)
         if consecutive_idle == 0:
-            progress_file = worktree_path / "scripts" / "ralph" / "progress.txt"
-            progress_file.parent.mkdir(parents=True, exist_ok=True)
-            status = "passed" if iteration_passed else "failed"
-            with open(progress_file, "a") as f:
-                f.write(f"\n## Iteration {iteration} — {status}\n---\n")
+            _write_iteration_progress_entry(
+                worktree_path,
+                iteration,
+                iteration_passed=iteration_passed,
+                duration_seconds=iter_duration,
+                findings=last_findings,
+            )
 
         # Early termination: if all stories are complete after this iteration,
         # skip remaining iterations instead of waiting for the coder to emit
