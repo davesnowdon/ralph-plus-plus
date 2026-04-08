@@ -183,3 +183,81 @@ def test_delegated_mode_returns_false_on_failure(tmp_path):
     result = _run_delegated(worktree, cfg)
 
     assert result is False
+
+
+def test_delegated_mode_counts_iterations_from_stdout(tmp_path):
+    """#109: counters['iterations'] should reflect what the sandbox printed."""
+    sandbox_dir = tmp_path / "ralph-sandbox"
+    (sandbox_dir / "bin").mkdir(parents=True)
+    wrapper = sandbox_dir / "bin" / "ralph-sandbox"
+    # Fake wrapper that emits the same iteration banner ralph-sandbox uses
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'echo "═══════════════════════════════════════════════════════════"\n'
+        'echo "  Ralph Iteration 1 of 8 (claude)"\n'
+        'echo "═══════════════════════════════════════════════════════════"\n'
+        'echo "doing work..."\n'
+        'echo "  Ralph Iteration 2 of 8 (claude)"\n'
+        'echo "  Ralph Iteration 3 of 8 (claude)"\n'
+        'echo "  Ralph Iteration 4 of 8 (claude)"\n'
+        'echo "  Ralph Iteration 5 of 8 (claude)"\n'
+        'echo "  Ralph Iteration 6 of 8 (claude)"\n'
+        'echo "  Ralph Iteration 7 of 8 (claude)"\n'
+        'echo "  Ralph Iteration 8 of 8 (claude)"\n'
+        "exit 0\n"
+    )
+    wrapper.chmod(0o755)
+    (sandbox_dir / "docker-compose.yml").write_text("version: '3'\n")
+
+    cfg = _make_config_with_sandbox_dir(str(sandbox_dir))
+    worktree = tmp_path / "project"
+    worktree.mkdir()
+
+    counters: dict[str, int] = {"iterations": 0, "retries": 0}
+    result = _run_delegated(worktree, cfg, counters)
+
+    assert result is True
+    assert counters["iterations"] == 8
+
+
+def test_delegated_mode_counter_records_partial_progress_on_failure(tmp_path):
+    """If the sandbox crashes mid-run, counters should reflect what got done."""
+    sandbox_dir = tmp_path / "ralph-sandbox"
+    (sandbox_dir / "bin").mkdir(parents=True)
+    wrapper = sandbox_dir / "bin" / "ralph-sandbox"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'echo "  Ralph Iteration 1 of 5 (claude)"\n'
+        'echo "  Ralph Iteration 2 of 5 (claude)"\n'
+        'echo "  Ralph Iteration 3 of 5 (claude)"\n'
+        "exit 1\n"
+    )
+    wrapper.chmod(0o755)
+    (sandbox_dir / "docker-compose.yml").write_text("version: '3'\n")
+
+    cfg = _make_config_with_sandbox_dir(str(sandbox_dir))
+    worktree = tmp_path / "project"
+    worktree.mkdir()
+
+    counters: dict[str, int] = {"iterations": 0, "retries": 0}
+    result = _run_delegated(worktree, cfg, counters)
+
+    assert result is False
+    assert counters["iterations"] == 3
+
+
+def test_delegated_mode_counter_default_arg_does_not_crash(tmp_path):
+    """_run_delegated must remain callable without an explicit counters arg."""
+    sandbox_dir = tmp_path / "ralph-sandbox"
+    (sandbox_dir / "bin").mkdir(parents=True)
+    wrapper = sandbox_dir / "bin" / "ralph-sandbox"
+    wrapper.write_text("#!/bin/bash\nexit 0\n")
+    wrapper.chmod(0o755)
+    (sandbox_dir / "docker-compose.yml").write_text("version: '3'\n")
+
+    cfg = _make_config_with_sandbox_dir(str(sandbox_dir))
+    worktree = tmp_path / "project"
+    worktree.mkdir()
+
+    # No counters passed — should default to a new dict and not raise
+    assert _run_delegated(worktree, cfg) is True
