@@ -409,6 +409,130 @@ class TestPromptMaxCycles:
             )
         assert result == "continue"
 
+    def test_explore_option_disabled_by_default(self):
+        """Without allow_explore, choice 4 must not be a valid choice."""
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt") as mock_prompt,
+        ):
+            mock_prompt.return_value = "3"
+            prompt_max_cycles("PRD", 3)
+        # Inspect the click.prompt call to confirm only 1/2/3 were offered
+        args, kwargs = mock_prompt.call_args
+        choice_obj = kwargs.get("type") or args[0]
+        # click.Choice exposes its choices via .choices
+        if hasattr(choice_obj, "choices"):
+            assert "4" not in choice_obj.choices
+
+    def test_explore_option_enabled(self):
+        """When allow_explore=True, choice 4 returns 'explore' (#120)."""
+        with (
+            patch("ralph_pp.steps.prd.is_non_interactive", return_value=False),
+            patch("ralph_pp.steps.prd.click.prompt", return_value="4"),
+        ):
+            assert prompt_max_cycles("PRD", 3, allow_explore=True) == "explore"
+
+    def test_explore_returns_other_actions_normally(self):
+        """allow_explore doesn't break the existing 1/2/3 mappings."""
+        with patch("ralph_pp.steps.prd.is_non_interactive", return_value=False):
+            with patch("ralph_pp.steps.prd.click.prompt", return_value="1"):
+                assert prompt_max_cycles("PRD", 3, allow_explore=True) == "quit"
+            with patch("ralph_pp.steps.prd.click.prompt", return_value="2"):
+                assert prompt_max_cycles("PRD", 3, allow_explore=True) == "retry"
+            with patch("ralph_pp.steps.prd.click.prompt", return_value="3"):
+                assert prompt_max_cycles("PRD", 3, allow_explore=True) == "continue"
+
+
+class TestExploreOption:
+    """Integration tests for #120 explore option in PRD review loop."""
+
+    def test_explore_launches_interactive_tool_then_re_reviews(self, tmp_path):
+        from ralph_pp.steps.prd import review_prd_loop
+
+        config = _make_config(prd_review=_review_cfg(max_cycles=1))
+        # Add an interactive tool
+        config.tools["claude-interactive"] = ToolConfig(
+            command="claude",
+            args=["{prompt}"],
+            interactive=True,
+        )
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        prompt_responses = iter(["explore", "continue"])
+        interactive_calls = []
+
+        def fake_make_tool(name, cfg):
+            mock_tool = MagicMock()
+            if name == "claude-interactive":
+
+                def fake_run(prompt, cwd):
+                    interactive_calls.append({"prompt": prompt, "cwd": cwd})
+                    return _ok_result("session done")
+
+                mock_tool.run.side_effect = fake_run
+            elif name == "codex":  # reviewer
+                # First call: rejection. Second call (after explore): LGTM.
+                mock_tool.run.side_effect = [
+                    _ok_result("1. severity: major\nproblem: thing"),
+                    _ok_result("LGTM"),
+                ]
+            else:  # claude (fixer)
+                mock_tool.run.return_value = _ok_result("fixed")
+            return mock_tool
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool", side_effect=fake_make_tool),
+            patch(
+                "ralph_pp.steps.prd.prompt_max_cycles",
+                side_effect=lambda *a, **kw: next(prompt_responses),
+            ),
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
+            review_prd_loop(prd_file, tmp_path, config)
+
+        # Interactive tool was invoked exactly once
+        assert len(interactive_calls) == 1
+        # Prompt should mention the PRD file path
+        assert str(prd_file) in interactive_calls[0]["prompt"]
+
+    def test_explore_falls_back_to_retry_when_no_interactive_tool(self, tmp_path):
+        """If no interactive tool is configured, log error and continue retrying."""
+        from ralph_pp.steps.prd import review_prd_loop
+
+        config = _make_config(prd_review=_review_cfg(max_cycles=1))
+        # Note: no interactive tool added
+        prd_file = tmp_path / "tasks" / "prd.md"
+        prd_file.parent.mkdir(parents=True)
+        prd_file.write_text("# PRD")
+
+        prompt_responses = iter(["explore", "continue"])
+
+        with (
+            patch("ralph_pp.steps.prd.make_tool") as mock_make,
+            patch(
+                "ralph_pp.steps.prd.prompt_max_cycles",
+                side_effect=lambda *a, **kw: next(prompt_responses),
+            ),
+            patch("ralph_pp.steps.prd.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.prd.get_diff", return_value="(no diff)"),
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.side_effect = [
+                _ok_result("1. severity: major\nproblem: alpha beta gamma"),
+                _ok_result("1. severity: major\nproblem: delta epsilon zeta"),
+            ]
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            # Should not raise — falls back gracefully
+            review_prd_loop(prd_file, tmp_path, config)
+
 
 class TestPromptMaxCyclesNonInteractive:
     """Non-interactive path for ``prompt_max_cycles`` — issue #128.
