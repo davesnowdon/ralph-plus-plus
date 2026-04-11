@@ -213,6 +213,29 @@ ralph++ config --repo /path/to/repo     # include project config
 ralph++ config --show-sources           # show which layer set each value
 ```
 
+### Where worktrees are created
+
+By default, ralph++ creates each run's git worktree as a flat sibling of the
+repo directory — a repo at `~/projects/lithos/code/lithos` gets worktrees at
+`~/projects/lithos/code/ralph-feature-abc123`. To group them under a
+dedicated directory instead, set `worktree_root`:
+
+```yaml
+worktree_root: ~/projects/lithos/code/worktrees
+```
+
+Absolute and `~`-prefixed paths are used verbatim. **Relative paths resolve
+against the repo root**, so a checked-in `<repo>/.ralph/ralph++.yaml` can
+stay portable across machines:
+
+```yaml
+# <repo>/.ralph/ralph++.yaml — works on any clone regardless of where the
+# repo lives on disk. Lands worktrees next to the repo in a dedicated dir.
+worktree_root: ../worktrees
+```
+
+The target directory is created on first use.
+
 ### Minimal project config (orchestrated + fix-in-place)
 
 The most common starting point for a new project. Place this at
