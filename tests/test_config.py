@@ -854,18 +854,22 @@ def test_worktree_root_defaults_to_none():
     assert cfg.worktree_root is None
 
 
-def test_worktree_root_loaded_from_file(tmp_path):
-    """A worktree_root YAML value is loaded and expanded to an absolute path."""
+def test_worktree_root_absolute_loaded_from_file(tmp_path):
+    """An absolute worktree_root YAML value is stored as a Path on Config.
+
+    Note: config loading only does expanduser() — it does NOT call resolve().
+    Final resolution against repo_path happens at use time in create_worktree.
+    """
     config_file = tmp_path / "ralph++.yaml"
     custom_root = tmp_path / "my-worktrees"
     config_file.write_text(yaml.dump({"worktree_root": str(custom_root)}))
 
     cfg = load_config(config_file)
-    assert cfg.worktree_root == custom_root.resolve()
+    assert cfg.worktree_root == custom_root
 
 
 def test_worktree_root_expands_home(tmp_path, monkeypatch):
-    """A `~`-prefixed worktree_root is expanded via the shared _expand helper."""
+    """A `~`-prefixed worktree_root is expanded at load time."""
     fake_home = tmp_path / "fakehome"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
@@ -874,7 +878,18 @@ def test_worktree_root_expands_home(tmp_path, monkeypatch):
     config_file.write_text(yaml.dump({"worktree_root": "~/ralph-wts"}))
 
     cfg = load_config(config_file)
-    assert cfg.worktree_root == (fake_home / "ralph-wts").resolve()
+    assert cfg.worktree_root == fake_home / "ralph-wts"
+
+
+def test_worktree_root_relative_preserved_at_load_time(tmp_path):
+    """Relative worktree_root values are stored unresolved so they can be
+    anchored to repo_path at use time (not CWD at config-load time)."""
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"worktree_root": "../worktrees"}))
+
+    cfg = load_config(config_file)
+    assert cfg.worktree_root == Path("../worktrees")
+    assert not cfg.worktree_root.is_absolute()
 
 
 def test_worktree_root_explicit_null_keeps_default(tmp_path):

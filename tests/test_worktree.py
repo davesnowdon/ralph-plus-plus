@@ -3,6 +3,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from ralph_pp.config import load_config
 from ralph_pp.steps.worktree import create_worktree, make_branch_name
 
@@ -81,7 +83,7 @@ class TestWorktreeRoot:
         assert path.name == branch.replace("/", "-")
 
     def test_custom_worktree_root_honored(self, tmp_path: Path):
-        """When worktree_root is set, worktrees are created under that root."""
+        """When worktree_root is set (absolute), worktrees land under that root."""
         cfg = load_config(None)
         cfg.repo_path = tmp_path / "repo"
         cfg.repo_path.mkdir()
@@ -97,3 +99,51 @@ class TestWorktreeRoot:
         assert path.name == branch.replace("/", "-")
         # And crucially, NOT under the repo's parent.
         assert path.parent != cfg.repo_path.parent
+
+    def test_relative_worktree_root_anchors_to_repo(self, tmp_path: Path):
+        """A relative worktree_root resolves against repo_path, not CWD.
+
+        This is the key ergonomic property: a checked-in .ralph/ralph++.yaml
+        can use `../worktrees` and land in the right place on any machine.
+        """
+        cfg = load_config(None)
+        # repo at tmp_path/code/myrepo, relative "../worktrees" should land
+        # at tmp_path/code/worktrees — next to the repo regardless of CWD.
+        (tmp_path / "code").mkdir()
+        cfg.repo_path = tmp_path / "code" / "myrepo"
+        cfg.repo_path.mkdir()
+        cfg.worktree_root = Path("../worktrees")
+
+        with patch("ralph_pp.steps.worktree.subprocess.run"):
+            path, branch = create_worktree("test feature", cfg)
+
+        expected_base = (tmp_path / "code" / "worktrees").resolve()
+        assert path.parent == expected_base
+        assert expected_base.is_dir()
+        assert path.name == branch.replace("/", "-")
+
+    def test_relative_worktree_root_ignores_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Relative worktree_root must NOT resolve against CWD.
+
+        Regression guard for the earlier implementation that used _expand
+        (which called .resolve() at config-load time, binding to CWD).
+        """
+        cfg = load_config(None)
+        (tmp_path / "code").mkdir()
+        cfg.repo_path = tmp_path / "code" / "myrepo"
+        cfg.repo_path.mkdir()
+        cfg.worktree_root = Path("../worktrees")
+
+        # Run from a completely unrelated CWD — result must still anchor to repo.
+        unrelated = tmp_path / "somewhere" / "else"
+        unrelated.mkdir(parents=True)
+        monkeypatch.chdir(unrelated)
+
+        with patch("ralph_pp.steps.worktree.subprocess.run"):
+            path, _ = create_worktree("test feature", cfg)
+
+        assert path.parent == (tmp_path / "code" / "worktrees").resolve()
+        # Not the CWD-anchored interpretation
+        assert path.parent != (unrelated / ".." / "worktrees").resolve()

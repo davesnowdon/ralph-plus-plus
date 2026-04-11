@@ -224,9 +224,17 @@ dedicated directory instead, set `worktree_root`:
 worktree_root: ~/projects/lithos/code/worktrees
 ```
 
-The directory is created on first use. Use absolute paths or `~`-prefixed
-paths — relative paths are resolved against the current working directory at
-load time, not the repo, which is usually not what you want.
+Absolute and `~`-prefixed paths are used verbatim. **Relative paths resolve
+against the repo root**, so a checked-in `<repo>/.ralph/ralph++.yaml` can
+stay portable across machines:
+
+```yaml
+# <repo>/.ralph/ralph++.yaml — works on any clone regardless of where the
+# repo lives on disk. Lands worktrees next to the repo in a dedicated dir.
+worktree_root: ../worktrees
+```
+
+The target directory is created on first use.
 
 ### Minimal project config (orchestrated + fix-in-place)
 

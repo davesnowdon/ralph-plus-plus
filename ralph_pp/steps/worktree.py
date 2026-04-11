@@ -21,6 +21,23 @@ def make_branch_name(feature: str, config: Config) -> str:
     return f"{config.branch_prefix}{slug}-{suffix}"
 
 
+def _resolve_worktree_base(config: Config) -> Path:
+    """Return the directory under which new worktrees will be created.
+
+    When ``config.worktree_root`` is unset, fall back to ``repo_path.parent``
+    (the original back-compatible behavior). Relative ``worktree_root``
+    values are resolved against ``config.repo_path`` — *not* CWD — so a
+    checked-in ``.ralph/ralph++.yaml`` can use paths like ``../worktrees``
+    without hardcoding environment-specific locations.
+    """
+    root = config.worktree_root
+    if root is None:
+        return config.repo_path.parent
+    if not root.is_absolute():
+        root = config.repo_path / root
+    return root.resolve()
+
+
 def create_worktree(feature: str, config: Config) -> tuple[Path, str]:
     """
     Create a git worktree for the feature.
@@ -29,9 +46,11 @@ def create_worktree(feature: str, config: Config) -> tuple[Path, str]:
         (worktree_path, branch_name)
     """
     # #151 / #153: honor config.worktree_root if set; otherwise fall back to
-    # sibling-of-repo for back-compat. mkdir is a no-op when the parent
-    # already exists (always true for repo_path.parent).
-    base = config.worktree_root or config.repo_path.parent
+    # sibling-of-repo for back-compat. Relative worktree_root values resolve
+    # against repo_path so a checked-in .ralph/ralph++.yaml can use
+    # "../worktrees" without hardcoding environment-specific paths. mkdir
+    # is a no-op when the parent already exists.
+    base = _resolve_worktree_base(config)
     base.mkdir(parents=True, exist_ok=True)
 
     # Try up to a few times in case the generated path already exists

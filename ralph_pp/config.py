@@ -782,7 +782,10 @@ def _build_config(data: dict[str, Any]) -> Config:
     if "codex_config_dir" in data:
         cfg.codex_config_dir = _expand(data["codex_config_dir"])
     if "worktree_root" in data and data["worktree_root"] is not None:
-        cfg.worktree_root = _expand(data["worktree_root"])
+        # Do NOT call _expand here — we want to defer .resolve() until we
+        # know config.repo_path, so relative paths anchor to the repo
+        # (not CWD). See create_worktree for the resolution step.
+        cfg.worktree_root = Path(str(data["worktree_root"])).expanduser()
 
     cfg.branch_prefix = data.get("branch_prefix", cfg.branch_prefix)
     cfg.branch_suffix_length = int(data.get("branch_suffix_length", cfg.branch_suffix_length))
