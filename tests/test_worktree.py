@@ -61,3 +61,39 @@ class TestWorktreeConflictCheck:
 
         assert call_count >= 2, "Should have retried after conflict"
         assert not path.exists() or call_count > 1
+
+
+class TestWorktreeRoot:
+    """#151 / #153: configurable worktree_root."""
+
+    def test_default_places_worktree_as_repo_sibling(self, tmp_path: Path):
+        """Regression guard: with worktree_root unset, worktrees are placed as
+        flat siblings of repo_path (existing behavior)."""
+        cfg = load_config(None)
+        cfg.repo_path = tmp_path / "repo"
+        cfg.repo_path.mkdir()
+        assert cfg.worktree_root is None
+
+        with patch("ralph_pp.steps.worktree.subprocess.run"):
+            path, branch = create_worktree("test feature", cfg)
+
+        assert path.parent == cfg.repo_path.parent
+        assert path.name == branch.replace("/", "-")
+
+    def test_custom_worktree_root_honored(self, tmp_path: Path):
+        """When worktree_root is set, worktrees are created under that root."""
+        cfg = load_config(None)
+        cfg.repo_path = tmp_path / "repo"
+        cfg.repo_path.mkdir()
+        custom_root = tmp_path / "some" / "nested" / "worktrees"
+        # Intentionally do NOT pre-create the root — create_worktree must mkdir.
+        cfg.worktree_root = custom_root
+
+        with patch("ralph_pp.steps.worktree.subprocess.run"):
+            path, branch = create_worktree("test feature", cfg)
+
+        assert custom_root.is_dir(), "worktree_root should be created on demand"
+        assert path.parent == custom_root
+        assert path.name == branch.replace("/", "-")
+        # And crucially, NOT under the repo's parent.
+        assert path.parent != cfg.repo_path.parent

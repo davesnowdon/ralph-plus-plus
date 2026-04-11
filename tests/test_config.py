@@ -842,3 +842,45 @@ def test_design_stance_invalid_value_rejected(tmp_path):
     config_file.write_text(yaml.dump({"design_stance": {"implementation_scope": "bogus"}}))
     with pytest.raises(ValueError, match="implementation_scope"):
         load_config(config_file)
+
+
+# ── worktree_root (#151 / #153) ─────────────────────────────────────────────
+
+
+def test_worktree_root_defaults_to_none():
+    """With no worktree_root in config, the field defaults to None so
+    create_worktree falls back to repo_path.parent."""
+    cfg = load_config(None)
+    assert cfg.worktree_root is None
+
+
+def test_worktree_root_loaded_from_file(tmp_path):
+    """A worktree_root YAML value is loaded and expanded to an absolute path."""
+    config_file = tmp_path / "ralph++.yaml"
+    custom_root = tmp_path / "my-worktrees"
+    config_file.write_text(yaml.dump({"worktree_root": str(custom_root)}))
+
+    cfg = load_config(config_file)
+    assert cfg.worktree_root == custom_root.resolve()
+
+
+def test_worktree_root_expands_home(tmp_path, monkeypatch):
+    """A `~`-prefixed worktree_root is expanded via the shared _expand helper."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text(yaml.dump({"worktree_root": "~/ralph-wts"}))
+
+    cfg = load_config(config_file)
+    assert cfg.worktree_root == (fake_home / "ralph-wts").resolve()
+
+
+def test_worktree_root_explicit_null_keeps_default(tmp_path):
+    """An explicit null in YAML means "use default", not "crash"."""
+    config_file = tmp_path / "ralph++.yaml"
+    config_file.write_text("worktree_root: null\n")
+
+    cfg = load_config(config_file)
+    assert cfg.worktree_root is None

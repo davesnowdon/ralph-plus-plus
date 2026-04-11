@@ -28,13 +28,19 @@ def create_worktree(feature: str, config: Config) -> tuple[Path, str]:
     Returns:
         (worktree_path, branch_name)
     """
+    # #151 / #153: honor config.worktree_root if set; otherwise fall back to
+    # sibling-of-repo for back-compat. mkdir is a no-op when the parent
+    # already exists (always true for repo_path.parent).
+    base = config.worktree_root or config.repo_path.parent
+    base.mkdir(parents=True, exist_ok=True)
+
     # Try up to a few times in case the generated path already exists
     # (e.g. from a previous failed run with the same random suffix).
     branch = ""
     worktree_path = Path()
     for _attempt in range(5):
         branch = make_branch_name(feature, config)
-        worktree_path = config.repo_path.parent / branch.replace("/", "-")
+        worktree_path = base / branch.replace("/", "-")
         if not worktree_path.exists():
             break
     else:
