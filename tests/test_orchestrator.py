@@ -196,3 +196,41 @@ class TestResumeWorktree:
         orch = Orchestrator("test-feature", cfg, resume_worktree=wt)
         with pytest.raises(ValueError, match="not a git directory"):
             orch.run()
+
+    def test_dry_run_resume_shows_resume_plan(self, tmp_path, capsys, monkeypatch):
+        """#154: --dry-run with --resume-worktree must print the resume plan,
+        not the fresh-run plan (no create-worktree / generate-PRD / convert-PRD).
+        """
+        from rich.console import Console
+
+        import ralph_pp.orchestrator as orch_mod
+        from ralph_pp.config import Config, OrchestratedConfig, PostReviewConfig, RalphConfig
+
+        # Widen the console so long tmp_path values don't wrap inside the panel.
+        monkeypatch.setattr(orch_mod, "console", Console(width=400))
+
+        cfg = Config.__new__(Config)
+        cfg.repo_path = tmp_path
+        cfg.ralph = RalphConfig(mode="delegated", max_iterations=7, sandbox_tool="claude")
+        cfg.post_review = PostReviewConfig(max_cycles=3)
+        cfg.hooks = {}
+        cfg.orchestrated = OrchestratedConfig()  # unused in delegated resume
+
+        wt = tmp_path / "existing-worktree"
+        # Dry-run should not touch the filesystem, so the path need not exist.
+
+        orch = Orchestrator("test-feature", cfg, dry_run=True, resume_worktree=wt)
+        orch.run()
+
+        out = capsys.readouterr().out
+        # Resume plan signals.
+        assert "Resuming:" in out
+        assert str(wt) in out
+        assert "Validate worktree" in out
+        assert "Delegated sandbox" in out
+        assert "Post-run review loop" in out
+        assert "Cleanup" in out
+        # Fresh-run steps must NOT appear
+        assert "Create worktree" not in out
+        assert "Generate PRD" not in out
+        assert "Convert PRD to prd.json" not in out

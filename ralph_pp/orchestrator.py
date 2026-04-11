@@ -324,6 +324,8 @@ class Orchestrator:
         lines.append(f"Repo:          {cfg.repo_path}")
         lines.append(f"Mode:          {mode}")
         lines.append(f"Max iterations: {cfg.ralph.max_iterations}")
+        if self.resume_worktree is not None:
+            lines.append(f"Resuming:      {self.resume_worktree}")
 
         if prd_only:
             lines.append("\n[bold]Steps:[/bold]")
@@ -331,6 +333,22 @@ class Orchestrator:
             if not skip_prd_review:
                 lines.append("  2. Review PRD loop")
             lines.append("  → Stop (--prd-only)")
+        elif self.resume_worktree is not None:
+            lines.append("\n[bold]Steps:[/bold]")
+            lines.append("  1. Validate worktree + prd.json")
+            if mode == "orchestrated":
+                strategy = "backout" if orch.backout_on_failure else "fixup"
+                lines.append(f"  2. Orchestrated sandbox ({strategy})")
+                lines.append(
+                    f"     Coder: {orch.coder}  Reviewer: {orch.reviewer}  Fixer: {orch.fixer}"
+                )
+                if orch.test_commands:
+                    lines.append(f"     Tests: {', '.join(orch.test_commands)}")
+            else:
+                lines.append(f"  2. Delegated sandbox (tool: {cfg.ralph.sandbox_tool})")
+            if not skip_post_review:
+                lines.append(f"  3. Post-run review loop (max {cfg.post_review.max_cycles} cycles)")
+            lines.append("  4. Cleanup")
         else:
             lines.append("\n[bold]Steps:[/bold]")
             lines.append("  1. Create worktree + branch")
