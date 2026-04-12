@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-
 from ralph_pp.cli import (
     WorktreeInfo,
     _build_overrides,

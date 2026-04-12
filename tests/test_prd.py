@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from ralph_pp.steps.prd import (
     convert_prd_to_json,
     feature_to_slug,

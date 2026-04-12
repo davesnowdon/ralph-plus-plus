@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from ralph_pp.config import (
     Config,
     PostReviewConfig,

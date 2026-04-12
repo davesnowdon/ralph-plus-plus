@@ -4,7 +4,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from ralph_pp.config import load_config
 from ralph_pp.steps.worktree import create_worktree, make_branch_name
 

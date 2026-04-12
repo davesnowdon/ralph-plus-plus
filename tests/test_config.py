@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from ralph_pp.config import (
     Config,
     ConfigProvenance,
@@ -101,11 +100,8 @@ def test_cli_overrides_take_precedence():
 def test_get_tool_raises_on_unknown():
     """get_tool raises ValueError for unknown tool names."""
     cfg = load_config(None)
-    try:
+    with pytest.raises(ValueError):
         cfg.get_tool("nonexistent")
-        assert False, "Should have raised"
-    except ValueError:
-        pass
 
 
 def test_default_mode_is_delegated():
