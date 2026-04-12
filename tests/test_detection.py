@@ -4,7 +4,6 @@ import tempfile
 from pathlib import Path
 
 import yaml
-
 from ralph_pp.config import load_config
 from ralph_pp.detection import detect_test_commands
 

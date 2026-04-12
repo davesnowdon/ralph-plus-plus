@@ -7,7 +7,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from ralph_pp.config import Config, ToolConfig
 from ralph_pp.skills import (
     _PLUGIN_NAME,

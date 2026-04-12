@@ -603,10 +603,13 @@ def worktrees_clean(
 
     # Confirmation: bypass for --dry-run, --yes, or when filters are in use
     # (the user has already narrowed scope explicitly).
-    if not dry_run and not skip_confirmation:
-        if not click.confirm(f"Remove {len(candidates)} ralph++ worktree(s)?", default=False):
-            console.print("[dim]Aborted.[/dim]")
-            return
+    if (
+        not dry_run
+        and not skip_confirmation
+        and not click.confirm(f"Remove {len(candidates)} ralph++ worktree(s)?", default=False)
+    ):
+        console.print("[dim]Aborted.[/dim]")
+        return
 
     removed = 0
     skipped = 0

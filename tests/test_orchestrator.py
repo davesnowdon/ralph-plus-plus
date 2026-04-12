@@ -4,7 +4,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from ralph_pp.orchestrator import Orchestrator
 
 
@@ -201,10 +200,9 @@ class TestResumeWorktree:
         """#154: --dry-run with --resume-worktree must print the resume plan,
         not the fresh-run plan (no create-worktree / generate-PRD / convert-PRD).
         """
-        from rich.console import Console
-
         import ralph_pp.orchestrator as orch_mod
         from ralph_pp.config import Config, OrchestratedConfig, PostReviewConfig, RalphConfig
+        from rich.console import Console
 
         # Widen the console so long tmp_path values don't wrap inside the panel.
         monkeypatch.setattr(orch_mod, "console", Console(width=400))

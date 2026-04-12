@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from ralph_pp.config import ToolConfig
 from ralph_pp.tools.cli_tool import CliTool
 

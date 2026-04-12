@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from ralph_pp.config import Config, OrchestratedConfig, RalphConfig, ToolConfig
 from ralph_pp.steps.sandbox import (
     ReviewResult,

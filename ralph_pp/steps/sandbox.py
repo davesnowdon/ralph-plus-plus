@@ -7,6 +7,7 @@ Supports two modes:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import logging
@@ -547,10 +548,8 @@ def _run_delegated(
             console.print(line.rstrip("\n"), markup=False, highlight=False)
             match = _DELEGATED_ITERATION_RE.search(line)
             if match:
-                try:
+                with contextlib.suppress(ValueError):
                     counters["iterations"] = int(match.group(1))
-                except ValueError:
-                    pass
     finally:
         proc.wait()
 

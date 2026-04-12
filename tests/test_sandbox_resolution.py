@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import pytest
-
 from ralph_pp.config import Config, RalphConfig, ToolConfig
 from ralph_pp.sandbox import resolve_sandbox_dir
 
