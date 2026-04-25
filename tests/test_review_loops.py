@@ -20,6 +20,21 @@ from ralph_pp.steps.prd import (
 from ralph_pp.tools.base import ToolResult
 
 
+@pytest.fixture(autouse=True)
+def _stub_post_review_commit(monkeypatch):
+    """Stub commit_if_dirty in post_review so tests don't need a real git repo.
+
+    The new commit-after-fixer call (regression for missing-commit bug) would
+    otherwise call ``git status`` against ``tmp_path``, which isn't a git repo
+    in these unit tests. Tests that need to observe commit behavior re-patch
+    the symbol locally with ``patch(...)``, which takes precedence over this.
+    """
+    monkeypatch.setattr(
+        "ralph_pp.steps.post_review.commit_if_dirty",
+        lambda worktree_path, message: False,
+    )
+
+
 def _make_config(
     prd_review: PrdReviewConfig | None = None,
     post_review: PostReviewConfig | None = None,
@@ -366,6 +381,76 @@ class TestPostReviewLoopMaxCycles:
             )
 
             post_review_loop(tmp_path, config)
+
+
+class TestPostReviewLoopCommitsFixerChanges:
+    """Post-run fixer changes must be committed so the working tree is clean
+    when the loop exits. Regression for missing ``commit_if_dirty`` call."""
+
+    def test_commit_called_after_each_fixer_pass(self, tmp_path):
+        config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=3))
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
+            patch("ralph_pp.steps.post_review.commit_if_dirty") as mock_commit,
+        ):
+            reviewer_mock = MagicMock()
+            # cycle 1: issues -> fixer runs; cycle 2: LGTM -> exit
+            reviewer_mock.run.side_effect = [
+                _ok_result("1. severity: major\nproblem: regression"),
+                _ok_result("LGTM"),
+            ]
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _ok_result("fixed")
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            post_review_loop(tmp_path, config)
+
+        assert mock_commit.call_count == 1
+        args, _ = mock_commit.call_args
+        assert args[0] == tmp_path
+        assert args[1].startswith("ralph: post-review fix cycle ")
+
+    def test_commit_not_called_when_fixer_fails(self, tmp_path):
+        """If the fixer raises, leave the worktree untouched for inspection."""
+        config = _make_config(post_review=_review_cfg(cls=PostReviewConfig, max_cycles=1))
+        prd_json = tmp_path / "scripts" / "ralph" / "prd.json"
+        prd_json.parent.mkdir(parents=True)
+        prd_json.write_text('{"userStories": []}')
+
+        with (
+            patch("ralph_pp.steps.post_review.make_tool") as mock_make,
+            patch("ralph_pp.steps.post_review.get_head_sha", return_value="abc1234"),
+            patch("ralph_pp.steps.post_review.get_diff", return_value="(no diff)"),
+            patch(
+                "ralph_pp.steps.post_review.run_test_commands_with_output",
+                return_value=(True, ""),
+            ),
+            patch("ralph_pp.steps.post_review.commit_if_dirty") as mock_commit,
+        ):
+            reviewer_mock = MagicMock()
+            reviewer_mock.run.return_value = _ok_result("Issues found")
+            fixer_mock = MagicMock()
+            fixer_mock.run.return_value = _fail_result()
+            mock_make.side_effect = lambda name, cfg: (
+                reviewer_mock if name == "codex" else fixer_mock
+            )
+
+            with pytest.raises(RuntimeError, match="Post-run fixer failed"):
+                post_review_loop(tmp_path, config)
+
+        mock_commit.assert_not_called()
 
 
 class TestPromptMaxCycles:
