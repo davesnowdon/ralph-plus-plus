@@ -9,7 +9,13 @@ from rich.console import Console
 
 from ..config import TEST_COMMANDS_GUIDANCE, Config, PostReviewConfig
 from ..tools import make_tool, make_tool_with_permissions
-from ._git import format_test_results, get_diff, get_head_sha, run_test_commands_with_output
+from ._git import (
+    commit_if_dirty,
+    format_test_results,
+    get_diff,
+    get_head_sha,
+    run_test_commands_with_output,
+)
 from ._prompts import render_prompt
 from .prd import MaxCyclesAbort, prompt_max_cycles
 from .sandbox import BASE_SHA_FILE, format_all_completed, truncate_diff
@@ -176,6 +182,7 @@ def post_review_loop(worktree_path: Path, config: Config) -> PostReviewResult:
                     f"{(fix_result.output or fix_result.stderr)[:200]}"
                 )
             last_fixer_diff = get_diff(worktree_path, pre_fix_sha)
+            commit_if_dirty(worktree_path, f"ralph: post-review fix cycle {total_cycles}")
 
         action = prompt_max_cycles(
             "Post-run",
