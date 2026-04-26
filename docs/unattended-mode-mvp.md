@@ -305,21 +305,22 @@ The MVP is complete when all of the following hold:
 
 ## Open Questions
 
-1. **Where does `--result-file` default when no worktree exists?** The
-   proposal in FR-2 is the working directory with a `run_id`-based name.
-   Confirm this is acceptable, or fix it to a different convention (e.g.
-   `$XDG_STATE_HOME/ralph++/results/`).
-2. **Run id generation: ULID, UUIDv7, or other?** All three are sortable.
-   ULID is shorter and human-friendly; UUIDv7 is standardised. Pick one
-   before implementation.
-3. **Should `--unattended` be accepted on subcommands other than `run`?**
-   For the MVP, only `run` is in scope. `worktrees clean` and `config` do
-   not need a result file. They should still respect plain-output behaviour
-   when `RALPH_UNATTENDED=1` is set in the environment so an orchestrator
+1. **Where does `--result-file` default when no worktree exists?** —
+   **Resolved:** the working directory with a `run_id`-based name
+   (`./ralph-result-{run_id}.json`). Predictable, no XDG dependency,
+   easy for an orchestrator to clean up. See
+   [unattended-mode-implementation-plan.md](unattended-mode-implementation-plan.md).
+2. **Run id generation: ULID, UUIDv7, or other?** — **Resolved: ULID**
+   via the `python-ulid` package. 26-char Crockford base32, sortable by
+   creation time, smaller and friendlier on the eye than UUIDv7.
+3. **Should `--unattended` be accepted on subcommands other than `run`?** —
+   For the MVP, only `run` accepts the flag. `worktrees clean` and `config`
+   do not need a result file. `RALPH_UNATTENDED=1` in the environment still
+   activates plain-output behaviour for any subcommand so an orchestrator
    spawning them gets clean stderr.
 4. **Do we want a `schema_version: 1` JSON Schema file checked into the
    repo?** Useful for orchestrator authors to validate against. Could be
-   added as a follow-up.
+   added as a follow-up; not blocking the MVP.
 
 ## Future Work (Not Part of MVP)
 

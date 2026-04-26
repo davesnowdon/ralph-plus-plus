@@ -350,6 +350,35 @@ npm, cargo, go).
 See [`ralph++.yaml.example`](ralph++.yaml.example) for all available options
 with comments.
 
+## Unattended Mode
+
+`ralph++` can be driven by an external orchestrator (a trigger service,
+queue consumer, scheduler, CI job) as a one-shot subprocess. The
+`--unattended` flag turns on a small, stable contract:
+
+- ANSI colour and rich formatting are suppressed
+- A JSON result file is **always** written atomically on exit, including
+  on raised exceptions and SIGTERM
+- Exit codes are stable: `0` succeeded · `1` failed · `20` bad input/config
+  (don't retry) · `30` interrupted by signal
+- A caller-supplied `--run-id` is echoed in the result file (a ULID is
+  generated when omitted)
+- SIGTERM / SIGINT trigger a graceful shutdown — the in-flight sandbox
+  child receives `terminate()` (escalating to `kill()` on a second signal
+  within 5 seconds), and the result file records `status: "interrupted"`.
+
+```bash
+RALPH_UNATTENDED=1 ralph++ run \
+  --feature add-rate-limiting \
+  --prd-file /tmp/prds/rate-limiting.md \
+  --result-file /tmp/results/rate-limiting.json \
+  --run-id 01HXYZ...
+```
+
+`RALPH_UNATTENDED=1` in the environment is equivalent to `--unattended`.
+See [docs/unattended-mode-mvp.md](docs/unattended-mode-mvp.md) for the
+full schema and contract.
+
 ## CLI Reference
 
 ```
@@ -373,6 +402,9 @@ Options:
   --codex-config PATH          Path to Codex config directory
   --sandbox-dir PATH           Path to ralph-sandbox checkout
   --setup-cmd TEXT             Shell command to run after worktree creation (repeatable)
+  --unattended                 Drive ralph++ from an external orchestrator (#163)
+  --run-id TEXT                Caller-supplied run id (ULID generated if absent)
+  --result-file PATH           Where the unattended-mode JSON result is written
   --dry-run                    Print what would be done
 ```
 

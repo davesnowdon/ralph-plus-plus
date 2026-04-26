@@ -248,3 +248,58 @@ class TestRunIdGeneration:
         b = unattended.generate_run_id()
         assert a != b
         assert len(a) == len(b) == 26
+
+
+class TestStartupAndShutdownLogs:
+    """Phase 5: a single startup + shutdown log line on stderr, plain-text."""
+
+    def test_logs_appear_with_expected_fields(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from unittest.mock import patch as _patch
+
+        from ralph_pp.config import (
+            Config,
+            OrchestratedConfig,
+            PostReviewConfig,
+            RalphConfig,
+        )
+        from ralph_pp.orchestrator import Orchestrator
+
+        cfg = Config.__new__(Config)
+        cfg.repo_path = tmp_path
+        cfg.ralph = RalphConfig(mode="delegated", max_iterations=1, sandbox_tool="claude")
+        cfg.post_review = PostReviewConfig(max_cycles=1)
+        cfg.hooks = {}
+        cfg.orchestrated = OrchestratedConfig()
+
+        orch = Orchestrator(
+            "test-feat",
+            cfg,
+            unattended=True,
+            run_id="01HXYZ" + "0" * 20,
+            result_file=tmp_path / "r.json",
+        )
+
+        with (
+            _patch.object(Orchestrator, "_step_cleanup"),
+            _patch.object(Orchestrator, "_step_post_review"),
+            _patch.object(Orchestrator, "_step_sandbox"),
+            _patch.object(Orchestrator, "_step_prd"),
+            _patch.object(Orchestrator, "_step_worktree"),
+            _patch("ralph_pp.orchestrator.validate_sandbox_prerequisites"),
+        ):
+            orch.run()
+
+        err = capsys.readouterr().err
+        assert "ralph++ started" in err
+        assert "ralph++ finished" in err
+        # Stable fields surface in the log.
+        assert "run_id=" in err
+        assert "feature=test-feat" in err
+        assert "status=succeeded" in err
+        assert "duration_seconds=" in err
+        # No ANSI escapes in the log lines specifically.
+        assert not ANSI_ESCAPE_RE.search(err), err

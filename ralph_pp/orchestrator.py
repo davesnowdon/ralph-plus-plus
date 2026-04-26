@@ -104,6 +104,17 @@ class Orchestrator:
         # turned into a graceful shutdown + interrupted result file
         # (#163, FR-6). Restored in finally below.
         prev_handlers = install_signal_handlers() if self.unattended else {}
+        if self.unattended:
+            self._emit_unattended_log(
+                "started",
+                started_at=started_at,
+                extra={
+                    "run_id": self.run_id or "",
+                    "feature": self.feature,
+                    "mode": self.config.ralph.mode,
+                    "result_file": str(self.result_file) if self.result_file else "<default>",
+                },
+            )
         try:
             if prd_only:
                 self._step_prd_only(skip_prd_review, manual_prd=manual_prd, prd_prompt=prd_prompt)
@@ -170,6 +181,27 @@ class Orchestrator:
                 # so the parent process / test harness is not left with
                 # ralph++'s handlers installed.
                 restore_signal_handlers(prev_handlers)
+                # Plain-text shutdown log line on stderr so an orchestrator
+                # parsing the process output (rather than the result file)
+                # still has a single deterministic line to grep for.
+                duration = time.monotonic() - start_time
+                self._emit_unattended_log(
+                    "finished",
+                    started_at=now_iso8601_ms(),
+                    extra={
+                        "run_id": self.run_id or "",
+                        "status": (
+                            "succeeded"
+                            if run_error is None
+                            else (
+                                "interrupted"
+                                if isinstance(run_error, KeyboardInterrupt)
+                                else "failed"
+                            )
+                        ),
+                        "duration_seconds": f"{duration:.3f}",
+                    },
+                )
 
         elapsed = time.monotonic() - start_time
         self._print_summary(elapsed, skip_post_review)
@@ -326,6 +358,19 @@ class Orchestrator:
         cleanup_orchestration_artifacts(self.worktree_path)
         cleanup_git_config(self.worktree_path, self._baseline_config_keys)
         run_hooks("post_complete", self.config.hooks, self.worktree_path)
+
+    # ── Unattended-mode logging (#163, phase 5) ───────────────────────
+
+    def _emit_unattended_log(self, event: str, *, started_at: str, extra: dict[str, str]) -> None:
+        """Write one machine-friendly log line to stderr.
+
+        Format: ``{iso_ts} ralph++ {event} key1=value1 key2=value2 ...``.
+        Bypasses Rich entirely so the line carries no escape codes
+        regardless of how the consoles are configured.
+        """
+        parts = [started_at, "ralph++", event]
+        parts.extend(f"{k}={v}" for k, v in extra.items())
+        print(" ".join(parts), file=sys.stderr, flush=True)
 
     # ── Unattended-mode result writing (#163, phase 2) ────────────────
 
