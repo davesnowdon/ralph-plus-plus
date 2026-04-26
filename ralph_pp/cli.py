@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import re
 import subprocess
@@ -22,9 +23,16 @@ from .config import (
 )
 from .orchestrator import Orchestrator
 from .unattended import (
+    SCHEMA_VERSION,
+    ErrorInfo,
+    RunResult,
+    classify_error,
     generate_run_id,
     is_unattended_env,
+    now_iso8601_ms,
     reconfigure_consoles_for_unattended,
+    resolve_result_path,
+    write_atomically,
 )
 
 console = Console()
@@ -90,6 +98,49 @@ def _build_overrides(
     if sandbox_dir:
         overrides["ralph"] = {"sandbox_dir": str(sandbox_dir)}
     return overrides
+
+
+def _write_early_failure_result(
+    *,
+    run_id: str,
+    feature: str | None,
+    error: BaseException,
+    result_file: Path | None,
+    started_at: str,
+) -> None:
+    """Write a minimal unattended result for failures *before* the
+    Orchestrator could write one (e.g. CLI conflict, config load error).
+
+    Writing failures are swallowed: the result file is best-effort here,
+    we still want to exit with the classified code regardless.
+    """
+    classification = classify_error(error)
+    finished_at = now_iso8601_ms()
+    error_info = ErrorInfo(
+        category=classification.error.category,
+        message=classification.error.message,
+        retriable=classification.error.retriable,
+    )
+    result = RunResult(
+        schema_version=SCHEMA_VERSION,
+        run_id=run_id,
+        status=classification.status,
+        exit_code=classification.exit_code,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_seconds=0.0,
+        feature=feature or "",
+        mode="",
+        repo="",
+        branch=None,
+        worktree=None,
+        iterations=0,
+        error=error_info,
+    )
+    path = resolve_result_path(explicit=result_file, worktree=None, run_id=run_id, cwd=Path.cwd())
+    # Best-effort; the exit code is still set by the caller regardless.
+    with contextlib.suppress(Exception):
+        write_atomically(path, result)
 
 
 # ── Common options ────────────────────────────────────────────────────
@@ -312,78 +363,118 @@ def run(
     if not unattended and is_unattended_env():
         unattended = True
 
-    if prd_only and prd_file:
-        raise click.UsageError("--prd-only and --prd-file are mutually exclusive.")
-    if resume_worktree and (prd_only or prd_file):
-        raise click.UsageError(
-            "--resume-worktree cannot be combined with --prd-only or --prd-file."
-        )
-
-    # Unattended mode requires no human-driven prompts (#163).
-    if unattended and manual_prd:
-        raise click.UsageError("--unattended cannot be combined with --manual-prd.")
-
-    # Resolve the run id once. Always populated when unattended is active so
-    # downstream code (and the eventual result file) can rely on it.
+    # Resolve the run id once when unattended so we can attribute even an
+    # early failure to a stable id in the result file.
     if unattended:
         run_id = run_id or generate_run_id()
         non_interactive = True
         reconfigure_consoles_for_unattended()
+    started_at = now_iso8601_ms()
 
-    # Derive feature from PRD filename when not explicitly provided.
-    if feature is None and prd_file is not None:
-        stem = prd_file.stem  # e.g. "prd-my-feature"
-        feature = stem.removeprefix("prd-") if stem.startswith("prd-") else stem
-    # For resume, derive feature from the worktree directory name
-    if feature is None and resume_worktree is not None:
-        feature = resume_worktree.name
-    if feature is None:
-        raise click.UsageError("--feature is required (or provide --prd-file to derive it).")
+    # Past this point, when ``unattended`` is True we translate any raised
+    # exception into a classified exit code (#163, FR-4) and ensure a result
+    # file has been written. The orchestrator writes its own result from
+    # ``.run()`` onward; for failures that happen *before* the orchestrator
+    # got a chance, we write a minimal early-failure result here.
+    orchestrator_started = False
+    try:
+        if prd_only and prd_file:
+            raise click.UsageError("--prd-only and --prd-file are mutually exclusive.")
+        if resume_worktree and (prd_only or prd_file):
+            raise click.UsageError(
+                "--resume-worktree cannot be combined with --prd-only or --prd-file."
+            )
 
-    config_paths, repo = _resolve_config(config_file, repo)
-    overrides = _build_overrides(repo, claude_config, codex_config, sandbox_dir)
+        # Unattended mode requires no human-driven prompts (#163).
+        if unattended and manual_prd:
+            raise click.UsageError("--unattended cannot be combined with --manual-prd.")
 
-    cfg = load_config(config_paths, overrides)
+        # Derive feature from PRD filename when not explicitly provided.
+        if feature is None and prd_file is not None:
+            stem = prd_file.stem  # e.g. "prd-my-feature"
+            feature = stem.removeprefix("prd-") if stem.startswith("prd-") else stem
+        # For resume, derive feature from the worktree directory name
+        if feature is None and resume_worktree is not None:
+            feature = resume_worktree.name
+        if feature is None:
+            raise click.UsageError("--feature is required (or provide --prd-file to derive it).")
 
-    # Apply CLI overrides that need post-load handling
-    if max_iters is not None:
-        cfg.ralph.max_iterations = max_iters
-    if mode is not None:
-        cfg.ralph.mode = parse_mode(mode)
-    if setup_cmd:
-        existing = cfg.hooks.get("post_worktree_create", [])
-        cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
-    if story_filter:
-        cfg.orchestrated.story_filter = list(story_filter)
-    # #121: CLI design-stance overrides win over config-file values.
-    if design_implementation_scope:
-        cfg.design_stance.implementation_scope = design_implementation_scope  # type: ignore[assignment]
-    if design_backward_compatibility:
-        cfg.design_stance.backward_compatibility = design_backward_compatibility  # type: ignore[assignment]
-    if design_existing_tests:
-        cfg.design_stance.existing_tests = design_existing_tests  # type: ignore[assignment]
-    if design_api_stability:
-        cfg.design_stance.api_stability = design_api_stability  # type: ignore[assignment]
-    if non_interactive:
-        cfg.non_interactive.enabled = True
+        config_paths, repo = _resolve_config(config_file, repo)
+        overrides = _build_overrides(repo, claude_config, codex_config, sandbox_dir)
 
-    orchestrator = Orchestrator(
-        feature=feature,
-        config=cfg,
-        dry_run=dry_run,
-        resume_worktree=resume_worktree,
-        unattended=unattended,
-        run_id=run_id,
-        result_file=result_file,
-    )
-    orchestrator.run(
-        skip_prd_review=skip_prd_review,
-        skip_post_review=skip_post_review,
-        prd_only=prd_only,
-        prd_file=prd_file,
-        prd_prompt=prd_prompt,
-        manual_prd=manual_prd,
-    )
+        cfg = load_config(config_paths, overrides)
+
+        # Apply CLI overrides that need post-load handling
+        if max_iters is not None:
+            cfg.ralph.max_iterations = max_iters
+        if mode is not None:
+            cfg.ralph.mode = parse_mode(mode)
+        if setup_cmd:
+            existing = cfg.hooks.get("post_worktree_create", [])
+            cfg.hooks["post_worktree_create"] = list(setup_cmd) + existing
+        if story_filter:
+            cfg.orchestrated.story_filter = list(story_filter)
+        # #121: CLI design-stance overrides win over config-file values.
+        if design_implementation_scope:
+            cfg.design_stance.implementation_scope = design_implementation_scope  # type: ignore[assignment]
+        if design_backward_compatibility:
+            cfg.design_stance.backward_compatibility = design_backward_compatibility  # type: ignore[assignment]
+        if design_existing_tests:
+            cfg.design_stance.existing_tests = design_existing_tests  # type: ignore[assignment]
+        if design_api_stability:
+            cfg.design_stance.api_stability = design_api_stability  # type: ignore[assignment]
+        if non_interactive:
+            cfg.non_interactive.enabled = True
+
+        orchestrator = Orchestrator(
+            feature=feature,
+            config=cfg,
+            dry_run=dry_run,
+            resume_worktree=resume_worktree,
+            unattended=unattended,
+            run_id=run_id,
+            result_file=result_file,
+        )
+        orchestrator_started = True
+        orchestrator.run(
+            skip_prd_review=skip_prd_review,
+            skip_post_review=skip_post_review,
+            prd_only=prd_only,
+            prd_file=prd_file,
+            prd_prompt=prd_prompt,
+            manual_prd=manual_prd,
+        )
+    except BaseException as exc:
+        # When unattended, translate every exception into a stable exit
+        # code per FR-4 and ensure a result file has been written. We catch
+        # ``BaseException`` so KeyboardInterrupt and ``MaxCyclesAbort``
+        # (a SystemExit subclass) are handled uniformly.
+        if not unattended:
+            raise
+        # A non-Click ``SystemExit`` carries its own exit code and the
+        # orchestrator has already written its result file. Pass it
+        # through unchanged. ``click.UsageError`` derives from
+        # ``Exception`` (not SystemExit) so it does not match here.
+        if isinstance(exc, SystemExit):
+            raise
+        if not orchestrator_started:
+            assert run_id is not None
+            _write_early_failure_result(
+                run_id=run_id,
+                feature=feature,
+                error=exc,
+                result_file=result_file,
+                started_at=started_at,
+            )
+        classification = classify_error(exc)
+        # Echo a single-line plain message to stderr so users diagnosing
+        # interactively still see what happened (rich panels are
+        # suppressed in unattended mode).
+        click.echo(
+            f"ralph++ run failed: {classification.error.category}: {classification.error.message}",
+            err=True,
+        )
+        raise SystemExit(classification.exit_code) from exc
 
 
 # ── config subcommand ─────────────────────────────────────────────────

@@ -26,10 +26,15 @@ from ulid import ULID
 ENV_VAR = "RALPH_UNATTENDED"
 SCHEMA_VERSION = 1
 
-# Phase 2 only emits the success and generic-failure exit codes. The full
-# table (20 = config error, 30 = interrupted) lands in phases 3 and 4.
+# Stable exit-code table from docs/unattended-mode-mvp.md (FR-4):
+#   0  — succeeded
+#   1  — generic failure (PRD, sandbox, review, internal)
+#   20 — bad input / config error (don't retry)
+#   30 — interrupted (signal-driven shutdown; full handling in phase 4)
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
+EXIT_CONFIG_ERROR = 20
+EXIT_INTERRUPTED = 30
 
 ResultStatus = Literal["succeeded", "failed", "interrupted"]
 ErrorCategory = Literal["config", "environment", "prd", "sandbox", "review", "internal"]
@@ -138,6 +143,94 @@ class RunResult:
         if self.error is None:
             data["error"] = None
         return data
+
+
+# ── Exception classification ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Classification:
+    """Result of mapping an exception to the unattended-mode contract."""
+
+    status: ResultStatus
+    exit_code: int
+    error: ErrorInfo
+
+
+def classify_error(exc: BaseException) -> Classification:
+    """Map *exc* to (status, exit_code, ErrorInfo) per FR-4.
+
+    The classifier is intentionally pattern-based and conservative: any
+    exception we don't recognise falls through to ``internal`` / exit 1
+    so the orchestrator never silently widens the success set.
+    """
+    import click as _click
+
+    from .steps.prd import MaxCyclesAbort
+    from .steps.sandbox import PrdParseError
+
+    message = str(exc) or exc.__class__.__name__
+
+    # Signal-driven shutdown. Phase 4 wires the actual handlers; this
+    # branch covers code paths that translate a signal into KeyboardInterrupt.
+    if isinstance(exc, KeyboardInterrupt):
+        return Classification(
+            status="interrupted",
+            exit_code=EXIT_INTERRUPTED,
+            error=ErrorInfo(category="internal", message="interrupted", retriable=True),
+        )
+
+    # User input / configuration problems — exit 20 so a caller knows not
+    # to retry without changing arguments.
+    if isinstance(exc, _click.UsageError | _click.BadParameter):
+        return Classification(
+            status="failed",
+            exit_code=EXIT_CONFIG_ERROR,
+            error=ErrorInfo(category="config", message=message, retriable=False),
+        )
+    if isinstance(exc, ValueError):
+        # Config validation, severity/mode parsing, primary-vs-linked
+        # worktree checks. All user-fixable.
+        return Classification(
+            status="failed",
+            exit_code=EXIT_CONFIG_ERROR,
+            error=ErrorInfo(category="config", message=message, retriable=False),
+        )
+    if isinstance(exc, FileNotFoundError):
+        # Missing config / PRD / runner — user-fixable.
+        return Classification(
+            status="failed",
+            exit_code=EXIT_CONFIG_ERROR,
+            error=ErrorInfo(category="config", message=message, retriable=False),
+        )
+
+    # Review-loop user abort. ``MaxCyclesAbort`` extends ``SystemExit`` so it
+    # bypasses Orchestrator's ``except Exception`` block, but the orchestrator's
+    # finally still calls into us.
+    if isinstance(exc, MaxCyclesAbort):
+        return Classification(
+            status="failed",
+            exit_code=EXIT_FAILURE,
+            error=ErrorInfo(category="review", message=message, retriable=False),
+        )
+
+    # PRD parsing error — surfaced from sandbox.py but semantically a PRD
+    # problem.
+    if isinstance(exc, PrdParseError):
+        return Classification(
+            status="failed",
+            exit_code=EXIT_FAILURE,
+            error=ErrorInfo(category="prd", message=message, retriable=False),
+        )
+
+    # Everything else — most commonly RuntimeError raised from sandbox or
+    # subprocess wrappers. Default to a retriable internal failure rather
+    # than assuming a category we cannot prove.
+    return Classification(
+        status="failed",
+        exit_code=EXIT_FAILURE,
+        error=ErrorInfo(category="internal", message=message, retriable=False),
+    )
 
 
 # ── Atomic result file writing ───────────────────────────────────────────

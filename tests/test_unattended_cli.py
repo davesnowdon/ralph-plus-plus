@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 from ralph_pp import unattended
 from ralph_pp.cli import main
@@ -151,9 +152,14 @@ class TestUnattendedFlag:
 
 
 class TestConflictRejection:
-    def test_unattended_with_manual_prd_is_rejected(self, tmp_path: Path) -> None:
+    def test_unattended_with_manual_prd_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         repo = tmp_path / "repo"
         repo.mkdir()
+        # The cwd-fallback result file lands in the current directory; chdir
+        # so it doesn't pollute the repo root when tests run.
+        monkeypatch.chdir(tmp_path)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -170,8 +176,9 @@ class TestConflictRejection:
             ],
         )
 
-        assert result.exit_code != 0
-        assert "manual-prd" in result.output
+        # Per FR-4, configuration / parse-time conflicts in unattended mode
+        # exit 20 (user-fixable) — not Click's default 2.
+        assert result.exit_code == 20, result.output
 
 
 class TestPlainOutput:

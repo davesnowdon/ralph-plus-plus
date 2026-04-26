@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -32,12 +33,11 @@ from .steps.worktree import (
     snapshot_local_config,
 )
 from .unattended import (
-    EXIT_FAILURE,
     EXIT_SUCCESS,
     SCHEMA_VERSION,
     ErrorInfo,
-    ResultStatus,
     RunResult,
+    classify_error,
     collect_artifacts,
     collect_commits,
     now_iso8601_ms,
@@ -139,9 +139,17 @@ class Orchestrator:
                 except Exception:
                     logging.getLogger(__name__).debug("post_failure hook failed", exc_info=True)
             # Unattended mode: always write a result file before returning,
-            # whether the run succeeded or raised. Errors here are logged but
-            # never re-raised so they cannot mask the original exception.
+            # whether the run succeeded or raised. ``BaseException``-derived
+            # exceptions (KeyboardInterrupt, MaxCyclesAbort) bypass the
+            # ``except Exception`` block above, so consult sys.exc_info as
+            # a fallback so the result accurately reflects the in-flight
+            # exception. Errors here are logged but never re-raised so they
+            # cannot mask the original exception.
             if self.unattended:
+                if run_error is None:
+                    in_flight = sys.exc_info()[1]
+                    if in_flight is not None:
+                        run_error = in_flight
                 try:
                     self._write_unattended_result(
                         started_at=started_at,
@@ -323,17 +331,14 @@ class Orchestrator:
         assert self.run_id is not None  # populated by the CLI in unattended mode
 
         if error is None:
-            status: ResultStatus = "succeeded"
+            status = "succeeded"
             exit_code = EXIT_SUCCESS
             error_info: ErrorInfo | None = None
         else:
-            status = "failed"
-            exit_code = EXIT_FAILURE
-            error_info = ErrorInfo(
-                category="internal",
-                message=str(error),
-                retriable=False,
-            )
+            classification = classify_error(error)
+            status = classification.status
+            exit_code = classification.exit_code
+            error_info = classification.error
 
         base_sha = self._run_summary.base_sha if self._run_summary else None
         result = RunResult(
