@@ -31,6 +31,19 @@ from .steps.worktree import (
     create_worktree,
     snapshot_local_config,
 )
+from .unattended import (
+    EXIT_FAILURE,
+    EXIT_SUCCESS,
+    SCHEMA_VERSION,
+    ErrorInfo,
+    ResultStatus,
+    RunResult,
+    collect_artifacts,
+    collect_commits,
+    now_iso8601_ms,
+    resolve_result_path,
+    write_atomically,
+)
 
 console = Console()
 
@@ -82,7 +95,9 @@ class Orchestrator:
             return
 
         start_time = time.monotonic()
+        started_at = now_iso8601_ms()
         failed = False
+        run_error: BaseException | None = None
         try:
             if prd_only:
                 self._step_prd_only(skip_prd_review, manual_prd=manual_prd, prd_prompt=prd_prompt)
@@ -103,6 +118,7 @@ class Orchestrator:
                 self._step_post_review()
         except Exception as exc:
             failed = True
+            run_error = exc
             console.print("[bold red]\n✗ Workflow failed:[/bold red] " + escape(str(exc)))
             raise
         finally:
@@ -122,6 +138,20 @@ class Orchestrator:
                     run_hooks("post_failure", self.config.hooks, self.worktree_path)
                 except Exception:
                     logging.getLogger(__name__).debug("post_failure hook failed", exc_info=True)
+            # Unattended mode: always write a result file before returning,
+            # whether the run succeeded or raised. Errors here are logged but
+            # never re-raised so they cannot mask the original exception.
+            if self.unattended:
+                try:
+                    self._write_unattended_result(
+                        started_at=started_at,
+                        elapsed=time.monotonic() - start_time,
+                        error=run_error,
+                    )
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "Failed to write unattended result file", exc_info=True
+                    )
 
         elapsed = time.monotonic() - start_time
         self._print_summary(elapsed, skip_post_review)
@@ -278,6 +308,60 @@ class Orchestrator:
         cleanup_orchestration_artifacts(self.worktree_path)
         cleanup_git_config(self.worktree_path, self._baseline_config_keys)
         run_hooks("post_complete", self.config.hooks, self.worktree_path)
+
+    # ── Unattended-mode result writing (#163, phase 2) ────────────────
+
+    def _write_unattended_result(
+        self,
+        *,
+        started_at: str,
+        elapsed: float,
+        error: BaseException | None,
+    ) -> None:
+        """Build a :class:`RunResult` and atomically write it to disk."""
+        assert self.unattended
+        assert self.run_id is not None  # populated by the CLI in unattended mode
+
+        if error is None:
+            status: ResultStatus = "succeeded"
+            exit_code = EXIT_SUCCESS
+            error_info: ErrorInfo | None = None
+        else:
+            status = "failed"
+            exit_code = EXIT_FAILURE
+            error_info = ErrorInfo(
+                category="internal",
+                message=str(error),
+                retriable=False,
+            )
+
+        base_sha = self._run_summary.base_sha if self._run_summary else None
+        result = RunResult(
+            schema_version=SCHEMA_VERSION,
+            run_id=self.run_id,
+            status=status,
+            exit_code=exit_code,
+            started_at=started_at,
+            finished_at=now_iso8601_ms(),
+            duration_seconds=round(elapsed, 3),
+            feature=self.feature,
+            mode=self.config.ralph.mode,
+            repo=str(Path(self.config.repo_path).resolve()),
+            branch=self.branch,
+            worktree=str(self.worktree_path) if self.worktree_path else None,
+            iterations=self._run_summary.iterations if self._run_summary else 0,
+            artifacts=collect_artifacts(self.worktree_path),
+            commits=collect_commits(self.worktree_path, base_sha),
+            error=error_info,
+        )
+
+        path = resolve_result_path(
+            explicit=self.result_file,
+            worktree=self.worktree_path,
+            run_id=self.run_id,
+            cwd=Path.cwd(),
+        )
+        write_atomically(path, result)
 
     def _print_summary(self, elapsed: float, skip_post_review: bool) -> None:
         console.print(Rule(style="green"))

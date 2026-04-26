@@ -2,26 +2,42 @@
 
 Unattended mode is the contract used when an external orchestrator drives
 ``ralph++`` as a subprocess (issue #163). It activates plain output, a
-caller-supplied run id, and (in later phases) an atomic JSON result file,
-stable exit codes, and graceful signal handling.
+caller-supplied run id, an atomic JSON result file, and (in later phases)
+stable exit codes and graceful signal handling.
 
-This module currently exposes only the Phase 1 surface:
-
-- :func:`is_unattended_env` — read ``RALPH_UNATTENDED`` from the env.
-- :func:`generate_run_id` — produce a ULID when the caller did not supply one.
-- :func:`reconfigure_consoles_for_unattended` — swap the module-level Rich
-  consoles in ``ralph_pp.cli`` and ``ralph_pp.orchestrator`` for instances that
-  emit no ANSI escape codes.
+The MVP schema and contract are defined in
+``docs/unattended-mode-mvp.md``.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import subprocess
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
 
 from rich.console import Console
 from ulid import ULID
 
 ENV_VAR = "RALPH_UNATTENDED"
+SCHEMA_VERSION = 1
+
+# Phase 2 only emits the success and generic-failure exit codes. The full
+# table (20 = config error, 30 = interrupted) lands in phases 3 and 4.
+EXIT_SUCCESS = 0
+EXIT_FAILURE = 1
+
+ResultStatus = Literal["succeeded", "failed", "interrupted"]
+ErrorCategory = Literal["config", "environment", "prd", "sandbox", "review", "internal"]
+
+_log = logging.getLogger(__name__)
+
+
+# ── Environment / identity helpers ───────────────────────────────────────
 
 
 def is_unattended_env() -> bool:
@@ -33,6 +49,17 @@ def is_unattended_env() -> bool:
 def generate_run_id() -> str:
     """Return a freshly minted ULID as a 26-char Crockford base32 string."""
     return str(ULID())
+
+
+def now_iso8601_ms() -> str:
+    """Return the current UTC time as ISO-8601 with millisecond precision."""
+    now = datetime.now(UTC)
+    # ``isoformat(timespec="milliseconds")`` yields e.g. "2026-04-26T10:31:04.812+00:00"
+    # — replace the offset with the canonical "Z" so the schema example matches.
+    return now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+# ── Console reconfiguration ──────────────────────────────────────────────
 
 
 def make_plain_console() -> Console:
@@ -65,3 +92,148 @@ def reconfigure_consoles_for_unattended() -> None:
     # attribute-access check on ModuleType, and without ruff's B010 on setattr.
     for module in (cli, hooks, orchestrator, skills, post_review, prd, sandbox, worktree, cli_tool):
         vars(module)["console"] = plain
+
+
+# ── Result schema ────────────────────────────────────────────────────────
+
+
+@dataclass
+class ErrorInfo:
+    """Populated on ``RunResult.error`` when the run did not succeed."""
+
+    category: ErrorCategory
+    message: str
+    retriable: bool
+
+
+@dataclass
+class RunResult:
+    """JSON-serialisable run outcome written to disk in unattended mode.
+
+    Field order and shape match the schema in
+    ``docs/unattended-mode-mvp.md`` (FR-3).
+    """
+
+    schema_version: int
+    run_id: str
+    status: ResultStatus
+    exit_code: int
+    started_at: str
+    finished_at: str
+    duration_seconds: float
+    feature: str
+    mode: str
+    repo: str
+    branch: str | None
+    worktree: str | None
+    iterations: int
+    artifacts: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    commits: list[str] = field(default_factory=lambda: list[str]())
+    error: ErrorInfo | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the JSON shape exactly as documented in the spec."""
+        data = asdict(self)
+        # asdict turns ErrorInfo into a dict; preserve null when absent.
+        if self.error is None:
+            data["error"] = None
+        return data
+
+
+# ── Atomic result file writing ───────────────────────────────────────────
+
+
+def write_atomically(path: Path, result: RunResult) -> None:
+    """Write *result* as JSON to *path* atomically.
+
+    The body is written to a sibling ``*.tmp`` file, fsynced, then
+    ``os.replace``\\ d into the target. Callers therefore never see a
+    half-written result. Parent directories are created on demand.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    payload = json.dumps(result.to_dict(), indent=2, sort_keys=False) + "\n"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def resolve_result_path(
+    *,
+    explicit: Path | None,
+    worktree: Path | None,
+    run_id: str,
+    cwd: Path,
+) -> Path:
+    """Decide where to write the result file (FR-2).
+
+    Priority:
+      1. ``explicit`` (``--result-file``)
+      2. ``{worktree}/scripts/ralph/result.json`` when a worktree exists
+      3. ``{cwd}/ralph-result-{run_id}.json``
+    """
+    if explicit is not None:
+        return explicit
+    if worktree is not None:
+        return worktree / "scripts" / "ralph" / "result.json"
+    return cwd / f"ralph-result-{run_id}.json"
+
+
+# ── Commit enumeration ───────────────────────────────────────────────────
+
+
+def collect_commits(worktree: Path | None, base_sha: str | None) -> list[str]:
+    """Return commit SHAs created on the worktree branch since *base_sha*.
+
+    Empty list when either argument is missing or when ``git`` invocation
+    fails — the result file must always be writable, so we never raise from
+    this helper.
+    """
+    if worktree is None or not base_sha:
+        return []
+    try:
+        completed = subprocess.run(
+            ["git", "log", f"{base_sha}..HEAD", "--format=%H"],
+            cwd=worktree,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        _log.debug("collect_commits failed: %s", exc, exc_info=True)
+        return []
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+# ── Artifact discovery ───────────────────────────────────────────────────
+
+
+def collect_artifacts(worktree: Path | None) -> dict[str, str]:
+    """Return artifact paths relative to *worktree*.
+
+    Currently surfaces ``prd``, ``progress``, and ``base_sha`` — only the
+    keys whose backing file actually exists are included (FR-3).
+    """
+    if worktree is None:
+        return {}
+
+    artifacts: dict[str, str] = {}
+
+    # The PRD filename embeds a slugified feature name; locate it by glob.
+    tasks_dir = worktree / "tasks"
+    if tasks_dir.is_dir():
+        prd_candidates = sorted(tasks_dir.glob("prd-*.md"))
+        if prd_candidates:
+            artifacts["prd"] = str(prd_candidates[0].relative_to(worktree))
+
+    progress_path = worktree / "scripts" / "ralph" / "progress.txt"
+    if progress_path.is_file():
+        artifacts["progress"] = str(progress_path.relative_to(worktree))
+
+    base_sha_path = worktree / "scripts" / "ralph" / ".base-sha"
+    if base_sha_path.is_file():
+        artifacts["base_sha"] = str(base_sha_path.relative_to(worktree))
+
+    return artifacts
