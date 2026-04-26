@@ -40,8 +40,10 @@ from .unattended import (
     classify_error,
     collect_artifacts,
     collect_commits,
+    install_signal_handlers,
     now_iso8601_ms,
     resolve_result_path,
+    restore_signal_handlers,
     write_atomically,
 )
 
@@ -98,6 +100,10 @@ class Orchestrator:
         started_at = now_iso8601_ms()
         failed = False
         run_error: BaseException | None = None
+        # Install SIGTERM/SIGINT handlers when unattended so a signal gets
+        # turned into a graceful shutdown + interrupted result file
+        # (#163, FR-6). Restored in finally below.
+        prev_handlers = install_signal_handlers() if self.unattended else {}
         try:
             if prd_only:
                 self._step_prd_only(skip_prd_review, manual_prd=manual_prd, prd_prompt=prd_prompt)
@@ -160,6 +166,10 @@ class Orchestrator:
                     logging.getLogger(__name__).warning(
                         "Failed to write unattended result file", exc_info=True
                     )
+                # Restore the previous signal disposition before returning
+                # so the parent process / test harness is not left with
+                # ralph++'s handlers installed.
+                restore_signal_handlers(prev_handlers)
 
         elapsed = time.monotonic() - start_time
         self._print_summary(elapsed, skip_post_review)

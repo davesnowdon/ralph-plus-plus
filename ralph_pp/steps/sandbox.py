@@ -28,6 +28,7 @@ from ..sandbox import resolve_sandbox_dir
 from ..tools.base import parse_max_severity, severity_at_or_above
 from ..tools.cli_tool import CliTool
 from ..tools.permissions import bash_permissions_from_commands
+from ..unattended import get_shutdown_state
 from ._git import (
     commit_if_dirty,
     format_test_results,
@@ -533,23 +534,29 @@ def _run_delegated(
 
     # Stream stdout line-by-line so we can both forward to the user AND
     # parse for iteration progress lines.
+    # ``start_new_session=True`` puts the child in its own process group so
+    # the unattended-mode signal handler can forward SIGTERM to the whole
+    # docker subtree without affecting our own process group (#163, FR-6).
     proc = subprocess.Popen(
         cmd,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=1,
+        start_new_session=True,
     )
     assert proc.stdout is not None
+    shutdown_state = get_shutdown_state()
     try:
-        for line in proc.stdout:
-            # Forward verbatim — disable Rich markup parsing because the
-            # subprocess line may contain bracketed text (#125).
-            console.print(line.rstrip("\n"), markup=False, highlight=False)
-            match = _DELEGATED_ITERATION_RE.search(line)
-            if match:
-                with contextlib.suppress(ValueError):
-                    counters["iterations"] = int(match.group(1))
+        with shutdown_state.track_subprocess(proc):
+            for line in proc.stdout:
+                # Forward verbatim — disable Rich markup parsing because the
+                # subprocess line may contain bracketed text (#125).
+                console.print(line.rstrip("\n"), markup=False, highlight=False)
+                match = _DELEGATED_ITERATION_RE.search(line)
+                if match:
+                    with contextlib.suppress(ValueError):
+                        counters["iterations"] = int(match.group(1))
     finally:
         proc.wait()
 

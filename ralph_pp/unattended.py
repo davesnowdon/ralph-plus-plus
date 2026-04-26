@@ -2,8 +2,8 @@
 
 Unattended mode is the contract used when an external orchestrator drives
 ``ralph++`` as a subprocess (issue #163). It activates plain output, a
-caller-supplied run id, an atomic JSON result file, and (in later phases)
-stable exit codes and graceful signal handling.
+caller-supplied run id, an atomic JSON result file, stable exit codes,
+and graceful signal handling.
 
 The MVP schema and contract are defined in
 ``docs/unattended-mode-mvp.md``.
@@ -11,17 +11,27 @@ The MVP schema and contract are defined in
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import signal
 import subprocess
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from types import FrameType
+from typing import Any, Literal
 
 from rich.console import Console
 from ulid import ULID
+
+# Same shape that ``signal.signal`` accepts and returns. Includes the int
+# sentinels SIG_DFL (0) and SIG_IGN (1), the Handlers enum members, and
+# Python-level callables.
+SignalHandler = Callable[[int, FrameType | None], Any] | int | signal.Handlers | None
 
 ENV_VAR = "RALPH_UNATTENDED"
 SCHEMA_VERSION = 1
@@ -330,3 +340,128 @@ def collect_artifacts(worktree: Path | None) -> dict[str, str]:
         artifacts["base_sha"] = str(base_sha_path.relative_to(worktree))
 
     return artifacts
+
+
+# ── Signal handling (#163, phase 4) ──────────────────────────────────────
+
+
+@dataclass
+class ShutdownState:
+    """Tracks an in-progress graceful shutdown triggered by a signal.
+
+    The orchestrator installs handlers via :func:`install_signal_handlers`
+    and registers the active sandbox subprocess via
+    :meth:`track_subprocess` so the handler can forward the signal to
+    docker / git children before the Python frame unwinds.
+    """
+
+    requested: bool = False
+    hard_kill: bool = False
+    signum: int | None = None
+    received_at: float | None = None
+    active_proc: subprocess.Popen[str] | None = None
+
+    @contextlib.contextmanager
+    def track_subprocess(self, proc: subprocess.Popen[str]) -> Iterator[None]:
+        """Register *proc* as the currently-active child subprocess.
+
+        While this context is open, a signal received by the parent will
+        terminate *proc* before raising ``KeyboardInterrupt`` in the main
+        thread. The previous registration (if any) is restored on exit.
+        """
+        previous = self.active_proc
+        self.active_proc = proc
+        try:
+            yield
+        finally:
+            self.active_proc = previous
+
+
+# Module-level singleton. Tests reset it by reassigning the public name
+# (e.g. ``ralph_pp.unattended._state = ShutdownState()``).
+_state = ShutdownState()
+
+
+def get_shutdown_state() -> ShutdownState:
+    """Return the singleton :class:`ShutdownState`."""
+    return _state
+
+
+# Signals we trap when unattended is active. SIGINT is included so that a
+# ``Ctrl-C`` in an interactive sanity check still produces a clean
+# result file with ``status: "interrupted"`` and exit 30.
+_TRAPPED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+
+# Hard-kill window: a second signal received within this many seconds
+# escalates from graceful shutdown to ``SIGKILL`` on the active child.
+_HARD_KILL_WINDOW_SECONDS = 5.0
+
+
+def _terminate_child(state: ShutdownState, hard: bool = False) -> None:
+    """Forward the shutdown to the registered child subprocess if any."""
+    proc = state.active_proc
+    if proc is None or proc.poll() is not None:
+        return
+    with contextlib.suppress(Exception):
+        if hard:
+            proc.kill()
+        else:
+            proc.terminate()
+
+
+def _shutdown_handler(signum: int, _frame: FrameType | None) -> None:
+    """Signal handler that requests a graceful shutdown.
+
+    The handler:
+
+    - records the signum and timestamp the first time it fires,
+    - terminates the active sandbox child (if registered) so a blocking
+      ``proc.stdout`` read unblocks promptly,
+    - escalates to ``SIGKILL`` on a second signal within
+      ``_HARD_KILL_WINDOW_SECONDS``,
+    - raises :class:`KeyboardInterrupt` so the orchestrator's ``finally``
+      writes a ``status: "interrupted"`` result and the CLI's classifier
+      maps the exception to exit code 30.
+    """
+    state = _state
+    now = time.monotonic()
+
+    if state.requested:
+        # Second signal — escalate.
+        if state.received_at is not None and now - state.received_at <= _HARD_KILL_WINDOW_SECONDS:
+            state.hard_kill = True
+            _terminate_child(state, hard=True)
+        raise KeyboardInterrupt(f"hard shutdown ({signal.Signals(signum).name})")
+
+    state.requested = True
+    state.signum = signum
+    state.received_at = now
+    _terminate_child(state)
+    raise KeyboardInterrupt(f"shutdown requested ({signal.Signals(signum).name})")
+
+
+def install_signal_handlers() -> dict[int, SignalHandler]:
+    """Install the unattended-mode shutdown handlers on SIGTERM and SIGINT.
+
+    Returns the previous handlers so the caller can restore them via
+    :func:`restore_signal_handlers`. Safe to call multiple times: the
+    second call simply overwrites with the same handler.
+    """
+    previous: dict[int, SignalHandler] = {}
+    for signum in _TRAPPED_SIGNALS:
+        try:
+            previous[signum] = signal.signal(signum, _shutdown_handler)
+        except (OSError, ValueError) as exc:
+            # Some test/CI environments restrict signal handling
+            # (e.g. running inside a non-main thread). Log and continue.
+            _log.debug("Could not install handler for %s: %s", signum, exc)
+            previous[signum] = None
+    return previous
+
+
+def restore_signal_handlers(previous: dict[int, SignalHandler]) -> None:
+    """Restore signal handlers captured from :func:`install_signal_handlers`."""
+    for signum, handler in previous.items():
+        if handler is not None:
+            with contextlib.suppress(OSError, ValueError):
+                signal.signal(signum, handler)
