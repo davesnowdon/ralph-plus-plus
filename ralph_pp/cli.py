@@ -21,6 +21,11 @@ from .config import (
     parse_mode,
 )
 from .orchestrator import Orchestrator
+from .unattended import (
+    generate_run_id,
+    is_unattended_env,
+    reconfigure_consoles_for_unattended,
+)
 
 console = Console()
 
@@ -245,6 +250,30 @@ _sandbox_dir_option = click.option(
     "stdin is not a TTY or RALPH_NON_INTERACTIVE=1 is set.",
 )
 @click.option(
+    "--unattended",
+    is_flag=True,
+    default=False,
+    help="Run as a child of an external orchestrator (#163). Implies "
+    "--non-interactive, suppresses ANSI colour output, and (in later phases) "
+    "writes a JSON result file with stable exit codes. Equivalent to "
+    "RALPH_UNATTENDED=1 in the environment.",
+)
+@click.option(
+    "--run-id",
+    "run_id",
+    default=None,
+    help="Caller-supplied run identifier echoed in the result file. "
+    "A ULID is generated when omitted. Only meaningful in --unattended mode.",
+)
+@click.option(
+    "--result-file",
+    type=click.Path(exists=False, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to write the unattended-mode JSON result. Defaults to "
+    "{worktree}/scripts/ralph/result.json or, if no worktree was created, "
+    "./ralph-result-{run_id}.json. Only meaningful in --unattended mode.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -273,15 +302,33 @@ def run(
     design_existing_tests: str | None,
     design_api_stability: str | None,
     non_interactive: bool,
+    unattended: bool,
+    run_id: str | None,
+    result_file: Path | None,
     dry_run: bool,
 ) -> None:
     """Run the full Ralph agentic coding workflow."""
+    # Honour RALPH_UNATTENDED=1 even when the flag is not passed (#163).
+    if not unattended and is_unattended_env():
+        unattended = True
+
     if prd_only and prd_file:
         raise click.UsageError("--prd-only and --prd-file are mutually exclusive.")
     if resume_worktree and (prd_only or prd_file):
         raise click.UsageError(
             "--resume-worktree cannot be combined with --prd-only or --prd-file."
         )
+
+    # Unattended mode requires no human-driven prompts (#163).
+    if unattended and manual_prd:
+        raise click.UsageError("--unattended cannot be combined with --manual-prd.")
+
+    # Resolve the run id once. Always populated when unattended is active so
+    # downstream code (and the eventual result file) can rely on it.
+    if unattended:
+        run_id = run_id or generate_run_id()
+        non_interactive = True
+        reconfigure_consoles_for_unattended()
 
     # Derive feature from PRD filename when not explicitly provided.
     if feature is None and prd_file is not None:
@@ -321,7 +368,13 @@ def run(
         cfg.non_interactive.enabled = True
 
     orchestrator = Orchestrator(
-        feature=feature, config=cfg, dry_run=dry_run, resume_worktree=resume_worktree
+        feature=feature,
+        config=cfg,
+        dry_run=dry_run,
+        resume_worktree=resume_worktree,
+        unattended=unattended,
+        run_id=run_id,
+        result_file=result_file,
     )
     orchestrator.run(
         skip_prd_review=skip_prd_review,

@@ -42,11 +42,21 @@ class Orchestrator:
         config: Config,
         dry_run: bool = False,
         resume_worktree: Path | None = None,
+        *,
+        unattended: bool = False,
+        run_id: str | None = None,
+        result_file: Path | None = None,
     ) -> None:
         self.feature = feature
         self.config = config
         self.dry_run = dry_run
         self.resume_worktree = resume_worktree
+        # Unattended-mode bookkeeping (#163). Phase 1 only stores these; later
+        # phases consume them to write the JSON result file, classify exit
+        # codes, and handle signals.
+        self.unattended = unattended
+        self.run_id = run_id
+        self.result_file = result_file
         self.worktree_path: Path | None = None
         self.branch: str | None = None
         self._baseline_config_keys: set[str] | None = None
