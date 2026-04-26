@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -31,6 +32,20 @@ from .steps.worktree import (
     create_worktree,
     snapshot_local_config,
 )
+from .unattended import (
+    EXIT_SUCCESS,
+    SCHEMA_VERSION,
+    ErrorInfo,
+    RunResult,
+    classify_error,
+    collect_artifacts,
+    collect_commits,
+    install_signal_handlers,
+    now_iso8601_ms,
+    resolve_result_path,
+    restore_signal_handlers,
+    write_atomically,
+)
 
 console = Console()
 
@@ -42,11 +57,21 @@ class Orchestrator:
         config: Config,
         dry_run: bool = False,
         resume_worktree: Path | None = None,
+        *,
+        unattended: bool = False,
+        run_id: str | None = None,
+        result_file: Path | None = None,
     ) -> None:
         self.feature = feature
         self.config = config
         self.dry_run = dry_run
         self.resume_worktree = resume_worktree
+        # Unattended-mode bookkeeping (#163). Phase 1 only stores these; later
+        # phases consume them to write the JSON result file, classify exit
+        # codes, and handle signals.
+        self.unattended = unattended
+        self.run_id = run_id
+        self.result_file = result_file
         self.worktree_path: Path | None = None
         self.branch: str | None = None
         self._baseline_config_keys: set[str] | None = None
@@ -72,7 +97,24 @@ class Orchestrator:
             return
 
         start_time = time.monotonic()
+        started_at = now_iso8601_ms()
         failed = False
+        run_error: BaseException | None = None
+        # Install SIGTERM/SIGINT handlers when unattended so a signal gets
+        # turned into a graceful shutdown + interrupted result file
+        # (#163, FR-6). Restored in finally below.
+        prev_handlers = install_signal_handlers() if self.unattended else {}
+        if self.unattended:
+            self._emit_unattended_log(
+                "started",
+                started_at=started_at,
+                extra={
+                    "run_id": self.run_id or "",
+                    "feature": self.feature,
+                    "mode": self.config.ralph.mode,
+                    "result_file": str(self.result_file) if self.result_file else "<default>",
+                },
+            )
         try:
             if prd_only:
                 self._step_prd_only(skip_prd_review, manual_prd=manual_prd, prd_prompt=prd_prompt)
@@ -93,6 +135,7 @@ class Orchestrator:
                 self._step_post_review()
         except Exception as exc:
             failed = True
+            run_error = exc
             console.print("[bold red]\n✗ Workflow failed:[/bold red] " + escape(str(exc)))
             raise
         finally:
@@ -112,6 +155,53 @@ class Orchestrator:
                     run_hooks("post_failure", self.config.hooks, self.worktree_path)
                 except Exception:
                     logging.getLogger(__name__).debug("post_failure hook failed", exc_info=True)
+            # Unattended mode: always write a result file before returning,
+            # whether the run succeeded or raised. ``BaseException``-derived
+            # exceptions (KeyboardInterrupt, MaxCyclesAbort) bypass the
+            # ``except Exception`` block above, so consult sys.exc_info as
+            # a fallback so the result accurately reflects the in-flight
+            # exception. Errors here are logged but never re-raised so they
+            # cannot mask the original exception.
+            if self.unattended:
+                if run_error is None:
+                    in_flight = sys.exc_info()[1]
+                    if in_flight is not None:
+                        run_error = in_flight
+                try:
+                    self._write_unattended_result(
+                        started_at=started_at,
+                        elapsed=time.monotonic() - start_time,
+                        error=run_error,
+                    )
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "Failed to write unattended result file", exc_info=True
+                    )
+                # Restore the previous signal disposition before returning
+                # so the parent process / test harness is not left with
+                # ralph++'s handlers installed.
+                restore_signal_handlers(prev_handlers)
+                # Plain-text shutdown log line on stderr so an orchestrator
+                # parsing the process output (rather than the result file)
+                # still has a single deterministic line to grep for.
+                duration = time.monotonic() - start_time
+                self._emit_unattended_log(
+                    "finished",
+                    started_at=now_iso8601_ms(),
+                    extra={
+                        "run_id": self.run_id or "",
+                        "status": (
+                            "succeeded"
+                            if run_error is None
+                            else (
+                                "interrupted"
+                                if isinstance(run_error, KeyboardInterrupt)
+                                else "failed"
+                            )
+                        ),
+                        "duration_seconds": f"{duration:.3f}",
+                    },
+                )
 
         elapsed = time.monotonic() - start_time
         self._print_summary(elapsed, skip_post_review)
@@ -268,6 +358,70 @@ class Orchestrator:
         cleanup_orchestration_artifacts(self.worktree_path)
         cleanup_git_config(self.worktree_path, self._baseline_config_keys)
         run_hooks("post_complete", self.config.hooks, self.worktree_path)
+
+    # ── Unattended-mode logging (#163, phase 5) ───────────────────────
+
+    def _emit_unattended_log(self, event: str, *, started_at: str, extra: dict[str, str]) -> None:
+        """Write one machine-friendly log line to stderr.
+
+        Format: ``{iso_ts} ralph++ {event} key1=value1 key2=value2 ...``.
+        Bypasses Rich entirely so the line carries no escape codes
+        regardless of how the consoles are configured.
+        """
+        parts = [started_at, "ralph++", event]
+        parts.extend(f"{k}={v}" for k, v in extra.items())
+        print(" ".join(parts), file=sys.stderr, flush=True)
+
+    # ── Unattended-mode result writing (#163, phase 2) ────────────────
+
+    def _write_unattended_result(
+        self,
+        *,
+        started_at: str,
+        elapsed: float,
+        error: BaseException | None,
+    ) -> None:
+        """Build a :class:`RunResult` and atomically write it to disk."""
+        assert self.unattended
+        assert self.run_id is not None  # populated by the CLI in unattended mode
+
+        if error is None:
+            status = "succeeded"
+            exit_code = EXIT_SUCCESS
+            error_info: ErrorInfo | None = None
+        else:
+            classification = classify_error(error)
+            status = classification.status
+            exit_code = classification.exit_code
+            error_info = classification.error
+
+        base_sha = self._run_summary.base_sha if self._run_summary else None
+        result = RunResult(
+            schema_version=SCHEMA_VERSION,
+            run_id=self.run_id,
+            status=status,
+            exit_code=exit_code,
+            started_at=started_at,
+            finished_at=now_iso8601_ms(),
+            duration_seconds=round(elapsed, 3),
+            feature=self.feature,
+            mode=self.config.ralph.mode,
+            repo=str(Path(self.config.repo_path).resolve()),
+            branch=self.branch,
+            worktree=str(self.worktree_path) if self.worktree_path else None,
+            iterations=self._run_summary.iterations if self._run_summary else 0,
+            artifacts=collect_artifacts(self.worktree_path),
+            commits=collect_commits(self.worktree_path, base_sha),
+            error=error_info,
+        )
+
+        path = resolve_result_path(
+            explicit=self.result_file,
+            worktree=self.worktree_path,
+            run_id=self.run_id,
+            cwd=Path.cwd(),
+        )
+        write_atomically(path, result)
 
     def _print_summary(self, elapsed: float, skip_post_review: bool) -> None:
         console.print(Rule(style="green"))
