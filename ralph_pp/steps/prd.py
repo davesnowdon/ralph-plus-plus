@@ -27,7 +27,7 @@ from ._prompts import render_prompt
 
 console = Console()
 
-MaxCyclesAction = Literal["quit", "retry", "continue"]
+MaxCyclesAction = Literal["quit", "retry", "continue", "explore"]
 
 
 class MaxCyclesAbort(SystemExit):
@@ -79,14 +79,18 @@ def prompt_max_cycles(
     non_interactive: NonInteractiveConfig | None = None,
     policy: OnMaxCycles | None = None,
     retry_used: bool = False,
+    allow_explore: bool = False,
 ) -> MaxCyclesAction:
     """Prompt the user for action when max review cycles are exhausted.
 
-    Returns one of: "quit", "retry", "continue".
+    Returns one of: "quit", "retry", "continue", or "explore" (when
+    *allow_explore* is True — see #120).
 
-    In non-interactive mode (see :func:`is_non_interactive`) the function does
-    not read stdin. Instead it applies *policy* (from the per-gate config) and
-    logs the chosen action so unattended runs do not hang indefinitely.
+    In non-interactive mode (see :func:`is_non_interactive`) the function
+    does not read stdin. Instead it applies *policy* (from the per-gate
+    config) and logs the chosen action so unattended runs do not hang.
+    The "explore" option is only offered when both *allow_explore* is True
+    AND we are running interactively — it has no meaning unattended.
     """
     console.print(
         f"\n[yellow]⚠ {phase} review: max cycles ({max_cycles}) reached without LGTM[/yellow]"
@@ -100,19 +104,84 @@ def prompt_max_cycles(
         )
         return action
 
-    console.print(
+    options_text = (
         "[bold]Options:[/bold]\n"
         "  [cyan]1)[/cyan] Quit — abort the workflow\n"
         f"  [cyan]2)[/cyan] Retry — run another {max_cycles} review cycles\n"
         f"  [cyan]3)[/cyan] {continue_label}"
     )
+    valid_choices = ["1", "2", "3"]
+    if allow_explore:
+        options_text += (
+            "\n  [cyan]4)[/cyan] Explore — open an interactive session to "
+            "edit the PRD, then run another review cycle"
+        )
+        valid_choices.append("4")
+    console.print(options_text)
     choice = click.prompt(
         "Choose",
-        type=click.Choice(["1", "2", "3"]),
+        type=click.Choice(valid_choices),
         default="3",
     )
-    mapping: dict[str, MaxCyclesAction] = {"1": "quit", "2": "retry", "3": "continue"}
+    mapping: dict[str, MaxCyclesAction] = {
+        "1": "quit",
+        "2": "retry",
+        "3": "continue",
+        "4": "explore",
+    }
     return mapping[choice]
+
+
+def _launch_interactive_explore(
+    phase: str,
+    target_file: Path,
+    findings: str,
+    config: Config,
+) -> None:
+    """Drop the user into an interactive Claude session to explore *target_file*.
+
+    Pre-loads the file path and last reviewer findings as context. Used by
+    the PRD review loops when the user picks the "Explore" option (#120).
+
+    Looks up an interactive tool by checking ``config.tools`` for any tool
+    with ``interactive=True``, preferring ``claude-interactive`` if present.
+    Raises ``RuntimeError`` when no interactive tool is configured.
+    """
+    interactive_tool_name: str | None = None
+    if "claude-interactive" in config.tools and config.tools["claude-interactive"].interactive:
+        interactive_tool_name = "claude-interactive"
+    else:
+        for name, tool_cfg in config.tools.items():
+            if tool_cfg.interactive:
+                interactive_tool_name = name
+                break
+
+    if interactive_tool_name is None:
+        raise RuntimeError(
+            "No interactive tool configured. Define a tool with `interactive: true` "
+            "in your ralph++.yaml (e.g. 'claude-interactive') to use the Explore option."
+        )
+
+    tool = make_tool(interactive_tool_name, config)
+    findings_block = ""
+    if findings:
+        findings_block = f"\n\nMost recent reviewer findings (verbatim):\n\n{findings.strip()}\n"
+    prompt = (
+        f"You are in an interactive review session for the {phase} at "
+        f"{target_file}. Read the file, discuss its design with the user, "
+        f"and edit it as needed. When you are done, type /exit to return "
+        f"to the ralph++ review loop, which will then run another review "
+        f"cycle to verify your changes.{findings_block}"
+    )
+    console.print(
+        f"\n[bold yellow]Opening interactive session ({interactive_tool_name}). "
+        "Type /exit when done.[/bold yellow]\n"
+    )
+    result = tool.run(prompt=prompt, cwd=target_file.parent)
+    if not result.success:
+        console.print(
+            f"[red]Interactive session ended with non-zero exit code ({result.exit_code})[/red]"
+        )
 
 
 def feature_to_slug(feature: str) -> str:
@@ -425,12 +494,31 @@ def review_prd_loop(prd_file: Path, worktree_path: Path, config: Config) -> None
             non_interactive=config.non_interactive,
             policy=config.non_interactive.on_max_cycles_prd,
             retry_used=retry_used,
+            allow_explore=True,
         )
         if action == "quit":
             raise MaxCyclesAbort
         if action == "continue":
             console.print("[yellow]Continuing without reviewer approval[/yellow]")
             return
+        if action == "explore":
+            # #120: drop into an interactive session, then run another batch
+            try:
+                _launch_interactive_explore(
+                    phase="PRD",
+                    target_file=prd_file,
+                    findings=previous_findings,
+                    config=config,
+                )
+            except RuntimeError as e:
+                console.print(f"[red]{e}[/red]")
+                console.print("[yellow]Falling back to retry[/yellow]")
+            console.print(f"[cyan]Resuming review loop ({review_cfg.max_cycles} cycles)...[/cyan]")
+            # Reset the per-batch context so the reviewer evaluates the
+            # post-explore PRD on its own merits.
+            previous_findings = ""
+            last_fixer_diff = ""
+            continue
         # action == "retry" → loop again
         retry_used = True
         console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")
@@ -582,11 +670,25 @@ def review_prd_json_loop(
             non_interactive=config.non_interactive,
             policy=config.non_interactive.on_max_cycles_prd_json,
             retry_used=retry_used,
+            allow_explore=True,
         )
         if action == "quit":
             raise MaxCyclesAbort
         if action == "continue":
             console.print("[yellow]Continuing without prd.json reviewer approval[/yellow]")
             return
+        if action == "explore":
+            try:
+                _launch_interactive_explore(
+                    phase="prd.json",
+                    target_file=prd_json,
+                    findings="",
+                    config=config,
+                )
+            except RuntimeError as e:
+                console.print(f"[red]{e}[/red]")
+                console.print("[yellow]Falling back to retry[/yellow]")
+            console.print(f"[cyan]Resuming review loop ({review_cfg.max_cycles} cycles)...[/cyan]")
+            continue
         retry_used = True
         console.print(f"[cyan]Retrying another {review_cfg.max_cycles} review cycles...[/cyan]")
